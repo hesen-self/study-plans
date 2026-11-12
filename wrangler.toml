@@ -2,11 +2,17 @@ name = "study-plans-api"
 main = "worker/index.ts"
 compatibility_date = "2026-01-01"
 
+# 静态资源：前端构建产物（单 Worker 同域托管 SPA + API，便于 Access 统一保护）
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"
+binding = "ASSETS"
+
 # 以下 ID 在部署阶段通过 wrangler 命令创建后回填
 [[d1_databases]]
 binding = "DB"
 database_name = "study-plans"
-database_id = "TODO-D1-DATABASE-ID"
+database_id = "2eadc76a-5f4d-4af4-9464-dbbaa5b49b5a"
 
 [[r2_buckets]]
 binding = "NOTES"
@@ -14,7 +20,7 @@ bucket_name = "study-plans-notes"
 
 [[kv_namespaces]]
 binding = "STATS_KV"
-id = "TODO-KV-NAMESPACE-ID"
+id = "bc6b7a8bba1346c393211c48d5e32ba8"
 
 [[vectorize]]
 binding = "VECTORS"

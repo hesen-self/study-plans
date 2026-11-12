@@ -7,6 +7,7 @@ type Bindings = {
   STATS_KV: KVNamespace
   VECTORS: VectorizeIndex
   AI: Ai
+  ASSETS: Fetcher
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -258,6 +259,16 @@ app.post('/api/search/semantic', async (c) => {
       preview: (m.metadata as { preview?: string })?.preview ?? '',
     })),
   })
+})
+
+// 非匹配路由（/api 之外的页面路径）→ 回退到静态资源，SPA 由 not_found_handling 处理
+app.get('*', async (c) => {
+  const res = await c.env.ASSETS.fetch(c.req.raw)
+  if (res.status === 404 && c.req.header('accept')?.includes('text/html')) {
+    const index = await c.env.ASSETS.fetch(new Request(new URL('/index.html', c.req.url)))
+    return new Response(index.body, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+  }
+  return res
 })
 
 export default app
