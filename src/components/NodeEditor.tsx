@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { api, DOMAIN_LABEL, Node } from '@/api'
+import { useEffect, useState } from 'react'
+import { api, Domain, Node } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -11,18 +11,40 @@ interface Props {
   onSaved: () => void
 }
 
-type Domain = Node['domain']
-const DOMAINS = Object.keys(DOMAIN_LABEL) as Domain[]
-
 export default function NodeEditor({ node, onClose, onSaved }: Props) {
   const isEdit = !!node
   const [name, setName] = useState(node?.name ?? '')
-  const [domain, setDomain] = useState<Domain>(node?.domain ?? 'java-ai')
+  const [domain, setDomain] = useState<string>(node?.domain ?? '')
+  const [domains, setDomains] = useState<Domain[]>([])
   const [level, setLevel] = useState(node?.level ?? 1)
   const [tags, setTags] = useState(() => {
     try { return node?.tags ? (JSON.parse(node.tags) as string[]).join(', ') : '' } catch { return '' }
   })
   const [saving, setSaving] = useState(false)
+  const [classifying, setClassifying] = useState(false)
+
+  // 加载领域清单
+  useEffect(() => {
+    api.domains().then((ds) => {
+      setDomains(ds)
+      setDomain((prev) => (prev && ds.some((d) => d.id === prev) ? prev : (ds[0]?.id ?? '')))
+    })
+  }, [])
+
+  // AI 识别领域（自动为主，可手动改）
+  const autoClassify = async () => {
+    if (!name.trim()) return
+    setClassifying(true)
+    try {
+      const tagArr = tags.split(/[,，]/).map((t) => t.trim()).filter(Boolean)
+      const r = await api.classifyDomain(name.trim(), tagArr)
+      setDomain(r.domain)
+    } catch {
+      // 识别失败保持原值
+    } finally {
+      setClassifying(false)
+    }
+  }
 
   const submit = async () => {
     if (!name.trim()) return
@@ -60,9 +82,14 @@ export default function NodeEditor({ node, onClose, onSaved }: Props) {
           </div>
           <div>
             <label className="mb-1 block text-sm text-muted-foreground">领域</label>
-            <Select value={domain} onChange={(e) => setDomain(e.target.value as Domain)} className="w-full">
-              {DOMAINS.map((d) => <option key={d} value={d}>{DOMAIN_LABEL[d]}</option>)}
-            </Select>
+            <div className="flex gap-2">
+              <Select value={domain} onChange={(e) => setDomain(e.target.value)} className="flex-1">
+                {domains.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </Select>
+              <Button variant="outline" size="sm" onClick={autoClassify} disabled={classifying || !name.trim()}>
+                {classifying ? '识别中…' : 'AI 识别'}
+              </Button>
+            </div>
           </div>
           <div>
             <label className="mb-1 block text-sm text-muted-foreground">等级</label>

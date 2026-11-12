@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Graph, GraphData, IElementEvent } from '@antv/g6'
-import { api, DOMAIN_COLOR, DOMAIN_LABEL, Edge, Node } from '@/api'
+import { api, DOMAIN_COLOR, Domain, Edge, Node } from '@/api'
 import NodeDrawer from '@/components/NodeDrawer'
 import NodeEditor from '@/components/NodeEditor'
 import EdgeEditor from '@/components/EdgeEditor'
+import AgentPanel from '@/components/AgentPanel'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -23,6 +24,7 @@ export default function GraphView() {
   const graphRef = useRef<Graph | null>(null)
   const [nodes, setNodes] = useState<Node[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
+  const [domains, setDomains] = useState<Domain[]>([])
   const [domainFilter, setDomainFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [keyword, setKeyword] = useState('')
@@ -32,9 +34,22 @@ export default function GraphView() {
   const [showNodeEditor, setShowNodeEditor] = useState(false)
   const [editingNode, setEditingNode] = useState<Node | null>(null)
   const [showEdgeEditor, setShowEdgeEditor] = useState(false)
+  const [showAgent, setShowAgent] = useState(false)
 
   const load = () => api.graph().then((d) => { setNodes(d.nodes); setEdges(d.edges) })
   useEffect(() => { load() }, [])
+
+  // 加载领域清单（图例与过滤选项用）
+  useEffect(() => {
+    api.domains().then(setDomains).catch(() => setDomains([]))
+  }, [])
+
+  // 领域颜色映射：优先 domains 表，回退静态默认值
+  const domainColorMap = useMemo(() => {
+    const m = new Map<string, string>(Object.entries(DOMAIN_COLOR))
+    for (const d of domains) m.set(d.id, d.color)
+    return m
+  }, [domains])
 
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase()
@@ -48,22 +63,25 @@ export default function GraphView() {
   }, [nodes, edges, domainFilter, statusFilter, keyword])
 
   const buildData = (ns: Node[], es: Edge[]): GraphData => ({
-    nodes: ns.map((n) => ({
-      id: n.id,
-      data: { ...n, tags: safeTags(n.tags) },
-      style: {
-        fill: DOMAIN_COLOR[n.domain],
-        fillOpacity: STATUS_OPACITY[n.status],
-        stroke: n.status === 'learning' ? '#185FA5' : DOMAIN_COLOR[n.domain],
-        lineWidth: STATUS_LINE[n.status],
-        size: 14 + n.level * 6,
-        labelText: n.name,
-        labelFill: '#1c1b18',
-        labelFontSize: 11,
-        labelPlacement: 'bottom' as const,
-        labelMaxWidth: 90,
-      },
-    })),
+    nodes: ns.map((n) => {
+      const color = domainColorMap.get(n.domain) ?? '#888780'
+      return {
+        id: n.id,
+        data: { ...n, tags: safeTags(n.tags) },
+        style: {
+          fill: color,
+          fillOpacity: STATUS_OPACITY[n.status],
+          stroke: n.status === 'learning' ? '#185FA5' : color,
+          lineWidth: STATUS_LINE[n.status],
+          size: 14 + n.level * 6,
+          labelText: n.name,
+          labelFill: '#1c1b18',
+          labelFontSize: 11,
+          labelPlacement: 'bottom' as const,
+          labelMaxWidth: 90,
+        },
+      }
+    }),
     edges: es.map((e) => ({
       source: e.source,
       target: e.target,
@@ -75,13 +93,21 @@ export default function GraphView() {
     })),
   })
 
-  // 初始化：仅创建一次 Graph 实例
+  // 创建/重建 Graph 实例：数据或领域颜色变化时，销毁旧实例并按最新数据重建，
+  // 避免 G6 setData 增量 diff 在筛选切换时抛 "Node not found" 或节点堆叠
   useEffect(() => {
     if (!ref.current) return
+    // 兜底过滤：边只保留两端节点都存在的，防止 orphan edge
+    const data = buildData(filtered.nodes, filtered.edges)
+    const validIds = new Set((data.nodes ?? []).map((n) => n.id))
+    data.edges = (data.edges ?? []).filter(
+      (e) => validIds.has(e.source) && validIds.has(e.target)
+    )
+
     const graph = new Graph({
       container: ref.current,
       autoFit: 'view',
-      data: buildData([], []),
+      data,
       layout: {
         type: 'd3-force',
         link: { distance: 90 },
@@ -97,20 +123,12 @@ export default function GraphView() {
     graph.render()
     graphRef.current = graph
     return () => {
-      if (graphRef.current === graph) {
-        graphRef.current = null
-        try { graph.destroy() } catch { /* 忽略销毁异常 */ }
-      }
+      graphRef.current = null
+      try { graph.destroy() } catch { /* 忽略销毁异常 */ }
     }
-  }, [])
-
-  // 数据更新：复用实例，setData 增量刷新
-  useEffect(() => {
-    const graph = graphRef.current
-    if (!graph) return
-    graph.setData(buildData(filtered.nodes, filtered.edges))
-    graph.render()
-  }, [filtered])
+    // 每次数据或领域颜色变化时重建，确保布局正确
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, domainColorMap])
 
   const doSemanticSearch = async () => {
     if (!semanticQ.trim()) return
@@ -147,9 +165,9 @@ export default function GraphView() {
   return (
     <div className="relative">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} className="w-32">
+        <Select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} className="w-36">
           <option value="">全部领域</option>
-          {Object.entries(DOMAIN_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          {domains.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
         </Select>
         <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-32">
           <option value="">全部状态</option>
@@ -171,6 +189,7 @@ export default function GraphView() {
           className="w-52"
         />
         <Button onClick={doSemanticSearch}>语义搜索</Button>
+        <Button variant="secondary" onClick={() => setShowAgent((v) => !v)}>AI 助手</Button>
         <div className="ml-auto flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={openNewNode}>新建节点</Button>
           <Button variant="outline" size="sm" onClick={() => setShowEdgeEditor(true)}>新建连线</Button>
@@ -178,13 +197,13 @@ export default function GraphView() {
           <Button variant="destructive" size="sm" disabled={!selected} onClick={removeNode}>删除</Button>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          {Object.entries(DOMAIN_LABEL).map(([k, v]) => (
-            <span key={k} className="flex items-center">
+          {domains.map((d) => (
+            <span key={d.id} className="flex items-center">
               <span
                 className="mr-1 inline-block h-2.5 w-2.5 rounded-full"
-                style={{ backgroundColor: DOMAIN_COLOR[k] }}
+                style={{ backgroundColor: d.color }}
               />
-              {v}
+              {d.name}
             </span>
           ))}
         </div>
@@ -215,10 +234,24 @@ export default function GraphView() {
         </div>
       )}
 
+      {showAgent && (
+        <div className="fixed inset-0 z-10 bg-black/25" onClick={() => setShowAgent(false)} />
+      )}
+
       <div
         ref={ref}
         className="h-[calc(100vh-110px)] w-full rounded-lg border border-border bg-card"
       />
+
+      {showAgent && (
+        <div className="fixed inset-y-0 right-0 z-[11] w-[400px] max-w-[90vw] overflow-y-auto border-l border-border bg-card p-5 shadow-lg">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-medium">AI 助手</h2>
+            <Button variant="ghost" size="sm" onClick={() => setShowAgent(false)}>关闭</Button>
+          </div>
+          <AgentPanel onBuilt={load} />
+        </div>
+      )}
 
       {selected && (
         <NodeDrawer

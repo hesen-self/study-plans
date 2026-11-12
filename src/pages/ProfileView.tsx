@@ -166,7 +166,10 @@ export default function ProfileView() {
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-          {field('email', '邮箱', 'you@example.com')}
+          <div>
+            <label className="mb-1 block text-sm text-muted-foreground">登录邮箱</label>
+            <Input value={profile.email} readOnly placeholder="you@example.com" className="bg-muted" />
+          </div>
           {field('phone', '电话', '…')}
           {field('location', '所在地', '…')}
           {field('website', '个人主页', 'https://…')}

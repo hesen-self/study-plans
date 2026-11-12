@@ -1,12 +1,20 @@
 export interface Node {
   id: string
   name: string
-  domain: 'ai-general' | 'java-ai' | 'frontend' | 'cs-basic'
+  domain: string
   level: number
   status: 'todo' | 'learning' | 'done'
   progress: number
   tags: string
   created_at?: string
+}
+
+// 领域定义（可配置，服务端 domains 表为准；此处为兜底默认值）
+export interface Domain {
+  id: string
+  name: string
+  color: string
+  sort: number
 }
 
 export interface Edge {
@@ -58,18 +66,46 @@ export interface Profile {
   updated_at?: string
 }
 
+export interface KnowledgeDoc {
+  id: number
+  user_id: string
+  node_id: string
+  title: string
+  content: string
+  code: string
+  source_urls: string
+  domain: string
+  seq: number
+  created_at?: string
+}
+
+
 export const DOMAIN_LABEL: Record<string, string> = {
+  'ai-ml': 'AI / 机器学习',
+  backend: '后端开发',
+  frontend: '前端开发',
+  data: '数据与数据库',
+  devops: '工程与运维',
+  'cs-basic': '计算机基础',
+  security: '安全',
+  product: '产品与软技能',
+  // 兼容旧值（存量数据迁移过渡）
   'ai-general': 'AI 通用',
   'java-ai': 'Java + AI',
-  frontend: '前端/Web',
-  'cs-basic': '计算机基础',
 }
 
 export const DOMAIN_COLOR: Record<string, string> = {
+  'ai-ml': '#7F77DD',
+  backend: '#D85A30',
+  frontend: '#378ADD',
+  data: '#D4A017',
+  devops: '#1D9E75',
+  'cs-basic': '#17A2B8',
+  security: '#C0392B',
+  product: '#7F8C8D',
+  // 兼容旧值
   'ai-general': '#7F77DD',
   'java-ai': '#D85A30',
-  frontend: '#378ADD',
-  'cs-basic': '#1D9E75',
 }
 
 export const STATUS_LABEL: Record<string, string> = {
@@ -110,8 +146,28 @@ export const api = {
   createEdge: (e: Partial<Edge>) => req('/api/edges', { method: 'POST', body: JSON.stringify(e) }),
   deleteEdge: (id: number) => req(`/api/edges/${id}`, { method: 'DELETE' }),
 
+  // 领域管理
+  domains: () => req<Domain[]>('/api/domains'),
+  createDomain: (d: Omit<Domain, 'sort'> & { sort?: number }) =>
+    req('/api/domains', { method: 'POST', body: JSON.stringify(d) }),
+  updateDomain: (id: string, patch: Partial<Omit<Domain, 'id'>>) =>
+    req(`/api/domains/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteDomain: (id: string) => req(`/api/domains/${id}`, { method: 'DELETE' }),
+
+  // AI 识别领域（手动创建节点时自动归类）
+  classifyDomain: (name: string, tags: string[]) =>
+    req<{ domain: string }>('/api/agent/classify-domain', {
+      method: 'POST',
+      body: JSON.stringify({ name, tags }),
+    }),
+
   roadmaps: () => req<Roadmap[]>('/api/roadmaps'),
   roadmap: (id: string) => req<Roadmap>(`/api/roadmaps/${id}`),
+  createRoadmap: (r: { id: string; name: string; description?: string }) =>
+    req('/api/roadmaps', { method: 'POST', body: JSON.stringify(r) }),
+  updateRoadmap: (id: string, patch: { name?: string; description?: string }) =>
+    req(`/api/roadmaps/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteRoadmap: (id: string) => req(`/api/roadmaps/${id}`, { method: 'DELETE' }),
   saveSteps: (id: string, steps: { node_id: string; seq: number }[]) =>
     req(`/api/roadmaps/${id}/steps`, { method: 'PUT', body: JSON.stringify(steps) }),
 
@@ -137,6 +193,40 @@ export const api = {
       '/api/search/semantic',
       { method: 'POST', body: JSON.stringify({ query }) }
     ),
+
+  // 联网搜索
+  webSearch: (query: string, limit = 5) =>
+    req<{ results: { url: string; title: string; description?: string }[] }>(
+      '/api/search/web',
+      { method: 'POST', body: JSON.stringify({ query, limit }) }
+    ),
+
+  // 一句话构建知识图谱
+  buildGraph: (topic: string) =>
+    req<{ ok: boolean; nodes: number; edges: number }>('/api/agent/build-graph', {
+      method: 'POST',
+      body: JSON.stringify({ topic }),
+    }),
+
+  // 知识库教材
+  knowledge: () => req<KnowledgeDoc[]>('/api/knowledge'),
+  knowledgeNodes: () =>
+    req<{ id: string; name: string; domain: string; level: number; parent_ids: string[] }[]>(
+      '/api/knowledge/nodes'
+    ),
+  generateKnowledgeNode: (node_id: string, seq: number, detailed = false) =>
+    req<{ ok: boolean; node_id: string; title: string }>('/api/knowledge/generate-node', {
+      method: 'POST',
+      body: JSON.stringify({ node_id, seq, detailed }),
+    }),
+  // 流式生成教材：返回 SSE 响应体，供前端逐块读取
+  streamGenerateKnowledgeNode: (node_id: string, seq: number, detailed = false) =>
+    fetch('/api/knowledge/stream-generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id, seq, detailed }),
+    }),
+  clearKnowledge: () => req<{ ok: boolean }>('/api/knowledge', { method: 'DELETE' }),
 
   profile: () => req<Profile>('/api/profile'),
   saveProfile: (p: Partial<Profile>) => {
@@ -167,4 +257,15 @@ export const api = {
     }
     return r.json() as Promise<{ avatar: string }>
   },
+
+  // 认证（应用层自建登录）
+  authMe: () => req<{ authenticated: boolean; user_id: string; email: string }>('/api/auth/me'),
+  sendCode: (email: string) =>
+    req<{ ok: boolean }>('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) }),
+  verifyCode: (email: string, code: string) =>
+    req<{ ok: boolean; email: string }>('/api/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    }),
+  logout: () => req<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
 }

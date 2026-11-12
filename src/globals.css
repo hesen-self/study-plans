@@ -36,3 +36,133 @@
     font-size: 0.875rem;
   }
 }
+
+/* 知识库正文富文本样式（marked 渲染的 markdown） */
+@layer components {
+  .kb-content {
+    font-size: 0.925rem;
+    line-height: 1.8;
+    color: hsl(var(--foreground));
+    word-break: break-word;
+  }
+  .kb-content > *:first-child {
+    margin-top: 0;
+  }
+  .kb-content h1,
+  .kb-content h2,
+  .kb-content h3,
+  .kb-content h4 {
+    font-weight: 600;
+    line-height: 1.4;
+    color: hsl(var(--foreground));
+  }
+  .kb-content h1 {
+    font-size: 1.4rem;
+    margin: 1.5rem 0 0.75rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .kb-content h2 {
+    font-size: 1.2rem;
+    margin: 1.4rem 0 0.6rem;
+  }
+  .kb-content h3 {
+    font-size: 1.05rem;
+    margin: 1.2rem 0 0.5rem;
+  }
+  .kb-content h4 {
+    font-size: 0.975rem;
+    margin: 1rem 0 0.4rem;
+  }
+  .kb-content p {
+    margin: 0.6rem 0;
+  }
+  .kb-content a {
+    color: hsl(var(--primary));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .kb-content a:hover {
+    text-decoration: none;
+  }
+  .kb-content strong {
+    font-weight: 600;
+  }
+  .kb-content ul,
+  .kb-content ol {
+    margin: 0.6rem 0;
+    padding-left: 1.5rem;
+  }
+  .kb-content ul {
+    list-style: disc;
+  }
+  .kb-content ol {
+    list-style: decimal;
+  }
+  .kb-content li {
+    margin: 0.25rem 0;
+  }
+  .kb-content li > ul,
+  .kb-content li > ol {
+    margin: 0.25rem 0;
+  }
+  .kb-content code {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.85em;
+    background: hsl(var(--secondary));
+    padding: 0.15em 0.4em;
+    border-radius: 0.3em;
+    color: hsl(var(--foreground));
+  }
+  .kb-content pre {
+    background: hsl(var(--secondary));
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.5rem;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    margin: 0.8rem 0;
+  }
+  .kb-content pre code {
+    background: transparent;
+    padding: 0;
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .kb-content blockquote {
+    margin: 0.8rem 0;
+    padding: 0.4rem 1rem;
+    border-left: 3px solid hsl(var(--primary));
+    background: hsl(var(--secondary) / 0.5);
+    color: hsl(var(--muted-foreground));
+    border-radius: 0 0.25rem 0.25rem 0;
+  }
+  .kb-content blockquote p {
+    margin: 0.3rem 0;
+  }
+  .kb-content hr {
+    border: none;
+    border-top: 1px solid hsl(var(--border));
+    margin: 1.5rem 0;
+  }
+  .kb-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0;
+    font-size: 0.875rem;
+  }
+  .kb-content th,
+  .kb-content td {
+    border: 1px solid hsl(var(--border));
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+  }
+  .kb-content th {
+    background: hsl(var(--secondary));
+    font-weight: 600;
+  }
+  .kb-content img {
+    max-width: 100%;
+    border-radius: 0.5rem;
+  }
+}
+

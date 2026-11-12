@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { marked } from 'marked'
 import { api, DOMAIN_LABEL, Node, Resource, STATUS_LABEL } from '@/api'
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +16,7 @@ interface Props {
 }
 
 export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) {
+  const navigate = useNavigate()
   const [note, setNote] = useState('')
   const [editingNote, setEditingNote] = useState(false)
   const [resources, setResources] = useState<Resource[]>([])
@@ -75,6 +77,15 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
         <div className="mt-2 flex flex-wrap gap-1">
           {tags.map((t) => <Badge key={t} variant="secondary">{t}</Badge>)}
         </div>
+
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-4 w-full"
+          onClick={() => navigate(`/knowledge?node=${encodeURIComponent(nodeId)}`)}
+        >
+          查看知识库明细
+        </Button>
 
         <section className="mt-5">
           <h3 className="text-lg font-medium">学习状态</h3>
