@@ -65,6 +65,20 @@ export const STATUS_LABEL: Record<string, string> = {
   done: '已掌握',
 }
 
+export interface Summary {
+  total: { minutes: number; count: number }
+  byDomain: { domain: string; minutes: number }[]
+  byWeek: { week: string; minutes: number }[]
+  byNode: { id: string; name: string; minutes: number }[]
+  streak: number
+}
+
+export interface HeatmapCell {
+  date: string
+  minutes: number
+  count: number
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -94,15 +108,8 @@ export const api = {
     req('/api/checkins', { method: 'POST', body: JSON.stringify(b) }),
   deleteCheckin: (id: number) => req(`/api/checkins/${id}`, { method: 'DELETE' }),
 
-  heatmap: () => req<{ date: string; minutes: number; count: number }[]>('/api/stats/heatmap'),
-  summary: () =>
-    req<{
-      total: { minutes: number; count: number }
-      byDomain: { domain: string; minutes: number }[]
-      byWeek: { week: string; minutes: number }[]
-      byNode: { id: string; name: string; minutes: number }[]
-      streak: number
-    }>('/api/stats/summary'),
+  heatmap: () => req<HeatmapCell[]>('/api/stats/heatmap'),
+  summary: () => req<Summary>('/api/stats/summary'),
 
   note: (nodeId: string) => req<{ content: string }>(`/api/notes/${nodeId}`),
   saveNote: (nodeId: string, content: string) =>

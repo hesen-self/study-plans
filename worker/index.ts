@@ -173,7 +173,7 @@ function calcStreak(datesDesc: string[]): number {
   const today = new Date()
   const fmt = (d: Date) => d.toISOString().slice(0, 10)
   // 今天没打卡则从昨天起算
-  let cursor = new Date(today)
+  const cursor = new Date(today)
   if (!set.has(fmt(cursor))) cursor.setDate(cursor.getDate() - 1)
   let streak = 0
   while (set.has(fmt(cursor))) {

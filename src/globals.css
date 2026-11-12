@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 33% 97%;
+    --foreground: 36 12% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 36 12% 10%;
+    --primary: 210 75% 37%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 40 20% 94%;
+    --secondary-foreground: 36 12% 10%;
+    --muted: 40 20% 94%;
+    --muted-foreground: 36 8% 45%;
+    --accent: 210 75% 37%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62% 41%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 36 12% 88%;
+    --input: 36 12% 88%;
+    --ring: 210 75% 37%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-size: 0.875rem;
+  }
+}

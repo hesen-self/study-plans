@@ -1,22 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Graph } from '@antv/g6'
-import { api, DOMAIN_COLOR, DOMAIN_LABEL, Node } from '../api'
-import NodeDrawer from '../components/NodeDrawer'
+import { Graph, IElementEvent } from '@antv/g6'
+import { api, DOMAIN_COLOR, DOMAIN_LABEL, Edge, Node } from '@/api'
+import NodeDrawer from '@/components/NodeDrawer'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 
 const STATUS_OPACITY: Record<string, number> = { todo: 0.45, learning: 1, done: 1 }
 const STATUS_LINE: Record<string, number> = { todo: 0, learning: 3, done: 1 }
+
+interface SemanticHit {
+  id: string
+  score: number
+  node: Node | null
+  preview: string
+}
 
 export default function GraphView() {
   const ref = useRef<HTMLDivElement>(null)
   const graphRef = useRef<Graph | null>(null)
   const [nodes, setNodes] = useState<Node[]>([])
-  const [edges, setEdges] = useState<any[]>([])
+  const [edges, setEdges] = useState<Edge[]>([])
   const [domainFilter, setDomainFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [keyword, setKeyword] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
   const [semanticQ, setSemanticQ] = useState('')
-  const [semanticRes, setSemanticRes] = useState<any[] | null>(null)
+  const [semanticRes, setSemanticRes] = useState<SemanticHit[] | null>(null)
 
   const load = () => api.graph().then((d) => { setNodes(d.nodes); setEdges(d.edges) })
   useEffect(() => { load() }, [])
@@ -73,7 +83,10 @@ export default function GraphView() {
       },
       behaviors: ['drag-canvas', 'zoom-canvas', 'drag-element'],
     })
-    graph.on('node:click', (e: any) => setSelected(e.target.id))
+    graph.on('node:click', (e: IElementEvent) => {
+      const id = (e.target as { id?: string }).id
+      if (id) setSelected(id)
+    })
     graph.render()
     graphRef.current = graph
     return () => graph.destroy()
@@ -84,61 +97,85 @@ export default function GraphView() {
     try {
       const r = await api.semanticSearch(semanticQ.trim())
       setSemanticRes(r.results)
-    } catch (e) {
+    } catch {
       alert('语义搜索失败：需部署后连接 Vectorize + Workers AI（本地模拟环境不可用）')
       setSemanticRes(null)
     }
   }
 
   return (
-    <div style={{ position: 'relative' }}>
-      <div className="toolbar">
-        <select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)}>
+    <div className="relative">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} className="w-32">
           <option value="">全部领域</option>
           {Object.entries(DOMAIN_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+        </Select>
+        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-32">
           <option value="">全部状态</option>
           <option value="todo">未开始</option>
           <option value="learning">学习中</option>
           <option value="done">已掌握</option>
-        </select>
-        <input placeholder="搜索知识点…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-        <input
-          placeholder="语义搜索（AI）…" style={{ width: 200 }}
+        </Select>
+        <Input
+          placeholder="搜索知识点…"
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          className="w-44"
+        />
+        <Input
+          placeholder="语义搜索（AI）…"
           value={semanticQ}
           onChange={(e) => setSemanticQ(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && doSemanticSearch()}
+          className="w-52"
         />
-        <button className="primary" onClick={doSemanticSearch}>语义搜索</button>
-        <span className="legend" style={{ marginLeft: 'auto' }}>
+        <Button onClick={doSemanticSearch}>语义搜索</Button>
+        <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
           {Object.entries(DOMAIN_LABEL).map(([k, v]) => (
-            <span key={k}><span className="dot" style={{ background: DOMAIN_COLOR[k] }} />{v}</span>
+            <span key={k} className="flex items-center">
+              <span
+                className="mr-1 inline-block h-2.5 w-2.5 rounded-full"
+                style={{ backgroundColor: DOMAIN_COLOR[k] }}
+              />
+              {v}
+            </span>
           ))}
-        </span>
+        </div>
       </div>
 
       {semanticRes && (
-        <div className="card search-results">
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-            <b>语义搜索结果</b>
-            <button onClick={() => setSemanticRes(null)}>关闭</button>
+        <div className="absolute left-[220px] top-16 z-[5] w-[360px] max-h-80 overflow-y-auto rounded-lg border border-border bg-card p-2 shadow-sm">
+          <div className="flex items-center justify-between px-2 pb-1">
+            <span className="text-sm font-medium">语义搜索结果</span>
+            <Button variant="ghost" size="sm" onClick={() => setSemanticRes(null)}>关闭</Button>
           </div>
-          {semanticRes.length === 0 && <div style={{ color: 'var(--text-2)' }}>无匹配结果</div>}
+          {semanticRes.length === 0 && (
+            <div className="px-2 py-1 text-sm text-muted-foreground">无匹配结果</div>
+          )}
           {semanticRes.map((r) => (
-            <div key={r.id} className="item" onClick={() => { setSelected(r.id); setSemanticRes(null) }}>
-              <span className="score">{(r.score * 100).toFixed(0)}%</span>
-              <b>{r.node?.name ?? r.id}</b>
-              <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{r.preview.slice(0, 60)}</div>
-            </div>
+            <button
+              key={r.id}
+              className="block w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-secondary"
+              onClick={() => { setSelected(r.id); setSemanticRes(null) }}
+            >
+              <span className="float-right text-xs text-muted-foreground">
+                {(r.score * 100).toFixed(0)}%
+              </span>
+              <span className="text-sm font-medium">{r.node?.name ?? r.id}</span>
+              <div className="text-xs text-muted-foreground">{r.preview.slice(0, 60)}</div>
+            </button>
           ))}
         </div>
       )}
 
-      <div ref={ref} className="graph-container" />
+      <div
+        ref={ref}
+        className="h-[calc(100vh-110px)] w-full rounded-lg border border-border bg-card"
+      />
 
       {selected && (
         <NodeDrawer
+          key={selected}
           nodeId={selected}
           node={nodes.find((n) => n.id === selected) ?? null}
           onClose={() => setSelected(null)}
