@@ -1,0 +1,24 @@
+name = "study-plans-api"
+main = "worker/index.ts"
+compatibility_date = "2026-01-01"
+
+# 以下 ID 在部署阶段通过 wrangler 命令创建后回填
+[[d1_databases]]
+binding = "DB"
+database_name = "study-plans"
+database_id = "TODO-D1-DATABASE-ID"
+
+[[r2_buckets]]
+binding = "NOTES"
+bucket_name = "study-plans-notes"
+
+[[kv_namespaces]]
+binding = "STATS_KV"
+id = "TODO-KV-NAMESPACE-ID"
+
+[[vectorize]]
+binding = "VECTORS"
+index_name = "study-notes"
+
+[ai]
+binding = "AI"

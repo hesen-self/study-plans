@@ -1,0 +1,43 @@
+{
+  "name": "study-plans",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite",
+    "dev:worker": "wrangler dev",
+    "dev": "concurrently -n worker,web -c blue,green \"npm:dev:worker\" \"npm:dev:web\"",
+    "build": "tsc -p . && vite build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "db:init": "wrangler d1 execute study-plans --local --file=migrations/0001_init.sql",
+    "db:seed": "wrangler d1 execute study-plans --local --file=seed/seed.sql",
+    "deploy:api": "wrangler deploy",
+    "deploy:web": "npm run build && wrangler pages deploy dist --project-name=study-plans"
+  },
+  "dependencies": {
+    "@antv/g6": "^5.0.49",
+    "echarts": "^5.5.0",
+    "hono": "^4.6.0",
+    "marked": "^14.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.2",
+    "concurrently": "^9.0.1",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.14.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.72.2",
+    "vite": "^5.4.9",
+    "wrangler": "^3.81.0"
+  }
+}
