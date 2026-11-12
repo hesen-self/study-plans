@@ -3,6 +3,9 @@ main = "worker/index.ts"
 compatibility_date = "2026-01-01"
 
 # 静态资源：前端构建产物（单 Worker 同域托管 SPA + API，便于 Access 统一保护）
+routes = [
+  { pattern = "study.hesen.dpdns.org", custom_domain = true }
+]
 [assets]
 directory = "./dist"
 not_found_handling = "single-page-application"
