@@ -5,3 +5,4 @@ dist/
 .cf-token
 *.local
 private/
+.vite/
