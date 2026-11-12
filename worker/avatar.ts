@@ -21,7 +21,7 @@ const DECLARED_TO_KIND: Record<string, ImageKind> = {
 }
 
 const AVATAR_KEY_RE =
-  /^avatars\/[a-zA-Z0-9.@+-]{1,200}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp|gif)$/
+  /^avatars\/[a-zA-Z0-9.@+_-]{1,200}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp|gif)$/
 
 export type UploadInspection =
   | { ok: true; kind: ImageKind; ext: string; contentType: string }

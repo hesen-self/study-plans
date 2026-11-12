@@ -95,6 +95,11 @@ test('server-generated keys are owned by the user and reject traversal/foreign k
   assert.equal(isOwnedAvatarKey('avatars/bob@example.com/11111111-1111-1111-1111-111111111111.png', 'alice@example.com'), false)
   assert.equal(avatarUserSegment('../notes/default'), '.._notes_default')
   assert.equal(avatarUserSegment(''), 'unknown')
+  // 回归：email 含下划线（如 haijing_geng@163.com）时，segment 会把 _ 保留为 _，
+  // 校验正则必须同样接受下划线，否则头像无法回显（此前 bug）
+  const underscoreKey = buildAvatarKey('haijing_geng@163.com', 'jpg')
+  assert.equal(isStoredAvatarKey(underscoreKey), true)
+  assert.equal(isOwnedAvatarKey(underscoreKey, 'haijing_geng@163.com'), true)
 })
 
 test('toClientAvatar never exposes raw object keys or dangerous URLs', () => {
