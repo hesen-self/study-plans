@@ -45,6 +45,19 @@ export interface Resource {
   kind: 'doc' | 'video' | 'repo' | 'article'
 }
 
+export interface Profile {
+  user_id: string
+  nickname: string
+  avatar: string
+  bio: string
+  goal: string
+  email: string
+  phone: string
+  location: string
+  website: string
+  updated_at?: string
+}
+
 export const DOMAIN_LABEL: Record<string, string> = {
   'ai-general': 'AI 通用',
   'java-ai': 'Java + AI',
@@ -124,4 +137,8 @@ export const api = {
       '/api/search/semantic',
       { method: 'POST', body: JSON.stringify({ query }) }
     ),
+
+  profile: () => req<Profile>('/api/profile'),
+  saveProfile: (p: Partial<Profile>) =>
+    req('/api/profile', { method: 'PUT', body: JSON.stringify(p) }),
 }

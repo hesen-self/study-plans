@@ -18,9 +18,21 @@ export default function StatsView() {
   const pieRef = useRef<HTMLDivElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
 
+  // 组件卸载时统一销毁 ECharts 实例，避免内存泄漏
+  useEffect(() => {
+    const doms = [heatmapRef.current, pieRef.current, barRef.current]
+    return () => {
+      doms.forEach((dom) => {
+        if (!dom) return
+        const instance = echarts.getInstanceByDom(dom)
+        if (instance) instance.dispose()
+      })
+    }
+  }, [])
+
   function renderHeatmap(data: HeatmapCell[]) {
     if (!heatmapRef.current) return
-    const chart = echarts.init(heatmapRef.current)
+    const chart = echarts.getInstanceByDom(heatmapRef.current) ?? echarts.init(heatmapRef.current)
     const today = new Date().toISOString().slice(0, 10)
     const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10)
     chart.setOption({
@@ -67,7 +79,7 @@ export default function StatsView() {
   useEffect(() => {
     if (!summary) return
     if (pieRef.current) {
-      const chart = echarts.init(pieRef.current)
+      const chart = echarts.getInstanceByDom(pieRef.current) ?? echarts.init(pieRef.current)
       chart.setOption({
         tooltip: { trigger: 'item', formatter: '{b}: {c} 分钟 ({d}%)' },
         series: [{
@@ -81,13 +93,13 @@ export default function StatsView() {
           label: { fontSize: 12 },
         }],
       })
-      return () => chart.dispose()
+      return undefined
     }
   }, [summary])
 
   useEffect(() => {
     if (!summary || !barRef.current) return
-    const chart = echarts.init(barRef.current)
+    const chart = echarts.getInstanceByDom(barRef.current) ?? echarts.init(barRef.current)
     chart.setOption({
       tooltip: { trigger: 'axis' },
       xAxis: { type: 'category', data: summary.byWeek.map((w) => w.week), axisLabel: { fontSize: 11 } },
@@ -95,7 +107,7 @@ export default function StatsView() {
       series: [{ type: 'bar', data: summary.byWeek.map((w) => w.minutes), itemStyle: { color: '#378ADD', borderRadius: [4, 4, 0, 0] } }],
       grid: { left: 50, right: 16, top: 30, bottom: 30 },
     })
-    return () => chart.dispose()
+    return undefined
   }, [summary])
 
   const submit = async () => {

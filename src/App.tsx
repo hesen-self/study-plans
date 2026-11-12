@@ -3,11 +3,13 @@ import { cn } from '@/lib/utils'
 import GraphView from '@/pages/GraphView'
 import RoadmapView from '@/pages/RoadmapView'
 import StatsView from '@/pages/StatsView'
+import ProfileView from '@/pages/ProfileView'
 
 const navItems = [
   { to: '/graph', label: '知识图谱' },
   { to: '/roadmap', label: '学习路线' },
   { to: '/stats', label: '打卡统计' },
+  { to: '/profile', label: '个人资料' },
 ]
 
 export default function App() {
@@ -40,6 +42,7 @@ export default function App() {
           <Route path="/graph" element={<GraphView />} />
           <Route path="/roadmap" element={<RoadmapView />} />
           <Route path="/stats" element={<StatsView />} />
+          <Route path="/profile" element={<ProfileView />} />
         </Routes>
       </main>
     </div>

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Graph, IElementEvent } from '@antv/g6'
+import { Graph, GraphData, IElementEvent } from '@antv/g6'
 import { api, DOMAIN_COLOR, DOMAIN_LABEL, Edge, Node } from '@/api'
 import NodeDrawer from '@/components/NodeDrawer'
+import NodeEditor from '@/components/NodeEditor'
+import EdgeEditor from '@/components/EdgeEditor'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -27,6 +29,9 @@ export default function GraphView() {
   const [selected, setSelected] = useState<string | null>(null)
   const [semanticQ, setSemanticQ] = useState('')
   const [semanticRes, setSemanticRes] = useState<SemanticHit[] | null>(null)
+  const [showNodeEditor, setShowNodeEditor] = useState(false)
+  const [editingNode, setEditingNode] = useState<Node | null>(null)
+  const [showEdgeEditor, setShowEdgeEditor] = useState(false)
 
   const load = () => api.graph().then((d) => { setNodes(d.nodes); setEdges(d.edges) })
   useEffect(() => { load() }, [])
@@ -42,39 +47,41 @@ export default function GraphView() {
     return { nodes: ns, edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)) }
   }, [nodes, edges, domainFilter, statusFilter, keyword])
 
+  const buildData = (ns: Node[], es: Edge[]): GraphData => ({
+    nodes: ns.map((n) => ({
+      id: n.id,
+      data: { ...n, tags: safeTags(n.tags) },
+      style: {
+        fill: DOMAIN_COLOR[n.domain],
+        fillOpacity: STATUS_OPACITY[n.status],
+        stroke: n.status === 'learning' ? '#185FA5' : DOMAIN_COLOR[n.domain],
+        lineWidth: STATUS_LINE[n.status],
+        size: 14 + n.level * 6,
+        labelText: n.name,
+        labelFill: '#1c1b18',
+        labelFontSize: 11,
+        labelPlacement: 'bottom' as const,
+        labelMaxWidth: 90,
+      },
+    })),
+    edges: es.map((e) => ({
+      source: e.source,
+      target: e.target,
+      style: {
+        stroke: e.type === 'prerequisite' ? '#888780' : '#D3D1C7',
+        lineDash: e.type === 'prerequisite' ? undefined : [4, 4],
+        endArrow: e.type === 'prerequisite',
+      },
+    })),
+  })
+
+  // 初始化：仅创建一次 Graph 实例
   useEffect(() => {
     if (!ref.current) return
-    graphRef.current?.destroy()
     const graph = new Graph({
       container: ref.current,
       autoFit: 'view',
-      data: {
-        nodes: filtered.nodes.map((n) => ({
-          id: n.id,
-          data: { ...n, tags: safeTags(n.tags) },
-          style: {
-            fill: DOMAIN_COLOR[n.domain],
-            fillOpacity: STATUS_OPACITY[n.status],
-            stroke: n.status === 'learning' ? '#185FA5' : DOMAIN_COLOR[n.domain],
-            lineWidth: STATUS_LINE[n.status],
-            size: 14 + n.level * 6,
-            labelText: n.name,
-            labelFill: '#1c1b18',
-            labelFontSize: 11,
-            labelPlacement: 'bottom',
-            labelMaxWidth: 90,
-          },
-        })),
-        edges: filtered.edges.map((e) => ({
-          source: e.source,
-          target: e.target,
-          style: {
-            stroke: e.type === 'prerequisite' ? '#888780' : '#D3D1C7',
-            lineDash: e.type === 'prerequisite' ? undefined : [4, 4],
-            endArrow: e.type === 'prerequisite',
-          },
-        })),
-      },
+      data: buildData([], []),
       layout: {
         type: 'd3-force',
         link: { distance: 90 },
@@ -89,7 +96,20 @@ export default function GraphView() {
     })
     graph.render()
     graphRef.current = graph
-    return () => graph.destroy()
+    return () => {
+      if (graphRef.current === graph) {
+        graphRef.current = null
+        try { graph.destroy() } catch { /* 忽略销毁异常 */ }
+      }
+    }
+  }, [])
+
+  // 数据更新：复用实例，setData 增量刷新
+  useEffect(() => {
+    const graph = graphRef.current
+    if (!graph) return
+    graph.setData(buildData(filtered.nodes, filtered.edges))
+    graph.render()
   }, [filtered])
 
   const doSemanticSearch = async () => {
@@ -101,6 +121,27 @@ export default function GraphView() {
       alert('语义搜索失败：需部署后连接 Vectorize + Workers AI（本地模拟环境不可用）')
       setSemanticRes(null)
     }
+  }
+
+  const selectedNode = nodes.find((n) => n.id === selected) ?? null
+
+  const removeNode = async () => {
+    if (!selected) return
+    if (!confirm(`确认删除节点「${selectedNode?.name ?? selected}」及其关联边、路线、打卡、资源、笔记？`)) return
+    await api.deleteNode(selected)
+    setSelected(null)
+    load()
+  }
+
+  const openEdit = () => {
+    if (!selectedNode) return
+    setEditingNode(selectedNode)
+    setShowNodeEditor(true)
+  }
+
+  const openNewNode = () => {
+    setEditingNode(null)
+    setShowNodeEditor(true)
   }
 
   return (
@@ -130,7 +171,13 @@ export default function GraphView() {
           className="w-52"
         />
         <Button onClick={doSemanticSearch}>语义搜索</Button>
-        <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={openNewNode}>新建节点</Button>
+          <Button variant="outline" size="sm" onClick={() => setShowEdgeEditor(true)}>新建连线</Button>
+          <Button variant="outline" size="sm" disabled={!selected} onClick={openEdit}>编辑</Button>
+          <Button variant="destructive" size="sm" disabled={!selected} onClick={removeNode}>删除</Button>
+        </div>
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {Object.entries(DOMAIN_LABEL).map(([k, v]) => (
             <span key={k} className="flex items-center">
               <span
@@ -180,6 +227,22 @@ export default function GraphView() {
           node={nodes.find((n) => n.id === selected) ?? null}
           onClose={() => setSelected(null)}
           onChanged={load}
+        />
+      )}
+
+      {showNodeEditor && (
+        <NodeEditor
+          node={editingNode}
+          onClose={() => { setShowNodeEditor(false); setEditingNode(null) }}
+          onSaved={() => { setShowNodeEditor(false); setEditingNode(null); load() }}
+        />
+      )}
+
+      {showEdgeEditor && (
+        <EdgeEditor
+          nodes={nodes}
+          onClose={() => setShowEdgeEditor(false)}
+          onSaved={() => { setShowEdgeEditor(false); load() }}
         />
       )}
     </div>
