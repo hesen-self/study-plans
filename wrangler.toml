@@ -17,6 +17,9 @@ binding = "DB"
 database_name = "study-plans"
 database_id = "2eadc76a-5f4d-4af4-9464-dbbaa5b49b5a"
 
+# 笔记与头像共用已在配置中声明的 study-plans-notes 桶（未在本次改动中新建桶）。
+# 对象 key：笔记 notes/{user}/… ；头像 avatars/{user}/{uuid}.ext
+# 本地 wrangler dev 默认使用本机 R2 模拟，不会写入远程桶。
 [[r2_buckets]]
 binding = "NOTES"
 bucket_name = "study-plans-notes"

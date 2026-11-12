@@ -139,6 +139,32 @@ export const api = {
     ),
 
   profile: () => req<Profile>('/api/profile'),
-  saveProfile: (p: Partial<Profile>) =>
-    req('/api/profile', { method: 'PUT', body: JSON.stringify(p) }),
+  saveProfile: (p: Partial<Profile>) => {
+    const body = {
+      nickname: p.nickname,
+      bio: p.bio,
+      goal: p.goal,
+      email: p.email,
+      phone: p.phone,
+      location: p.location,
+      website: p.website,
+    }
+    return req<{ ok: true; avatar: string }>('/api/profile', { method: 'PUT', body: JSON.stringify(body) })
+  },
+  uploadAvatar: async (file: File): Promise<{ avatar: string }> => {
+    const body = new FormData()
+    body.append('file', file)
+    const r = await fetch('/api/profile/avatar', { method: 'POST', body })
+    if (!r.ok) {
+      let message = `${r.status} ${r.statusText}`
+      try {
+        const data = (await r.json()) as { error?: string }
+        if (data.error) message = data.error
+      } catch {
+        // keep status text
+      }
+      throw new Error(message)
+    }
+    return r.json() as Promise<{ avatar: string }>
+  },
 }

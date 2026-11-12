@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, Profile } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,14 +16,29 @@ const EMPTY: Profile = {
   website: '',
 }
 
+const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
+const MAX_BYTES = 5 * 1024 * 1024
+
 export default function ProfileView() {
   const [profile, setProfile] = useState<Profile>(EMPTY)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  const [uploadOk, setUploadOk] = useState(false)
+  const [localPreview, setLocalPreview] = useState('')
+  const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     api.profile().then((p) => setProfile({ ...EMPTY, ...p }))
   }, [])
+
+  useEffect(() => {
+    return () => {
+      if (localPreview) URL.revokeObjectURL(localPreview)
+    }
+  }, [localPreview])
 
   const set = (k: keyof Profile, v: string) => {
     setProfile((prev) => ({ ...prev, [k]: v }))
@@ -32,9 +47,46 @@ export default function ProfileView() {
 
   const save = async () => {
     setSaving(true)
-    await api.saveProfile(profile)
-    setSaving(false)
-    setSaved(true)
+    setSaveError('')
+    setSaved(false)
+    try {
+      await api.saveProfile(profile)
+      setSaved(true)
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onPickFile = async (file: File | undefined) => {
+    setUploadError('')
+    setUploadOk(false)
+    if (!file) return
+    if (file.size > MAX_BYTES) {
+      setUploadError('文件过大，最大 5MB')
+      return
+    }
+    if (file.type && !ACCEPT.split(',').includes(file.type) && file.type !== 'image/jpg') {
+      setUploadError('仅支持 JPG、PNG、WebP、GIF 图片')
+      return
+    }
+    if (localPreview) URL.revokeObjectURL(localPreview)
+    const preview = URL.createObjectURL(file)
+    setLocalPreview(preview)
+    setUploading(true)
+    try {
+      const res = await api.uploadAvatar(file)
+      setProfile((prev) => ({ ...prev, avatar: res.avatar }))
+      setUploadOk(true)
+      URL.revokeObjectURL(preview)
+      setLocalPreview('')
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : '上传失败')
+    } finally {
+      setUploading(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
   }
 
   const field = (k: keyof Profile, label: string, placeholder: string) => (
@@ -43,6 +95,8 @@ export default function ProfileView() {
       <Input value={profile[k]} onChange={(e) => set(k, e.target.value)} placeholder={placeholder} />
     </div>
   )
+
+  const displaySrc = localPreview || profile.avatar
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -55,8 +109,8 @@ export default function ProfileView() {
       <div className="mt-6 space-y-5 rounded-lg border border-border bg-card p-6">
         <div className="flex items-center gap-4">
           <div className="h-20 w-20 shrink-0 overflow-hidden rounded-full border border-border bg-secondary">
-            {profile.avatar ? (
-              <img src={profile.avatar} alt="头像" className="h-full w-full object-cover" />
+            {displaySrc ? (
+              <img src={displaySrc} alt="头像" className="h-full w-full object-cover" />
             ) : (
               <span className="flex h-full items-center justify-center text-2xl text-muted-foreground">
                 {profile.nickname?.slice(0, 1) || '?'}
@@ -65,7 +119,29 @@ export default function ProfileView() {
           </div>
           <div className="flex-1">
             {field('nickname', '昵称', '你的昵称')}
-            <div className="mt-3">{field('avatar', '头像 URL', 'https://…')}</div>
+            <div className="mt-3">
+              <p className="mb-1 text-sm text-muted-foreground">头像</p>
+              <input
+                ref={fileRef}
+                type="file"
+                accept={ACCEPT}
+                className="sr-only"
+                disabled={uploading}
+                onChange={(e) => void onPickFile(e.target.files?.[0])}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={uploading}
+                onClick={() => fileRef.current?.click()}
+              >
+                {uploading ? '上传中…' : '上传图片'}
+              </Button>
+              <p className="mt-1 text-sm text-muted-foreground">支持 JPG、PNG、WebP、GIF，最大 5MB。</p>
+              {uploadOk && <p className="mt-1 text-sm text-muted-foreground">头像已更新</p>}
+              {uploadError && <p className="mt-1 text-sm text-destructive">{uploadError}</p>}
+            </div>
           </div>
         </div>
 
@@ -96,8 +172,10 @@ export default function ProfileView() {
           {field('website', '个人主页', 'https://…')}
         </div>
 
+        {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+
         <div className="flex justify-end">
-          <Button onClick={save} disabled={saving}>{saving ? '保存中…' : '保存'}</Button>
+          <Button onClick={() => void save()} disabled={saving || uploading}>{saving ? '保存中…' : '保存'}</Button>
         </div>
       </div>
     </div>

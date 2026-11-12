@@ -10,6 +10,7 @@
     "build": "tsc -p . && vite build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "test": "node --experimental-strip-types --test tests/avatar.test.ts",
     "db:init": "wrangler d1 execute study-plans --local --file=migrations/0001_init.sql",
     "db:seed": "wrangler d1 execute study-plans --local --file=seed/seed.sql",
     "deploy:api": "wrangler deploy",

@@ -1,5 +1,14 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import {
+  AVATAR_MAX_BYTES,
+  buildAvatarKey,
+  inspectAvatarUpload,
+  isOwnedAvatarKey,
+  publicAvatarUrl,
+  requestLooksTooLarge,
+  toClientAvatar,
+} from './avatar.ts'
 
 type Bindings = {
   DB: D1Database
@@ -219,29 +228,129 @@ app.get('/api/me', async (c) => {
 
 app.get('/api/profile', async (c) => {
   const uid = c.get('userId')
-  const row = await c.env.DB.prepare('SELECT * FROM profile WHERE user_id = ?').bind(uid).first()
-  if (!row) return c.json({ user_id: uid, email: uid })
-  return c.json(row)
+  const row = await c.env.DB.prepare('SELECT * FROM profile WHERE user_id = ?').bind(uid).first<ProfileRow>()
+  if (!row) return c.json({ user_id: uid, email: uid === DEFAULT_USER_ID ? '' : uid, avatar: '' })
+  return c.json({ ...row, avatar: toClientAvatar(row.avatar, row.updated_at) })
 })
 
 app.put('/api/profile', async (c) => {
   const uid = c.get('userId')
   const b = await c.req.json()
-  const fields = ['nickname', 'avatar', 'bio', 'goal', 'email', 'phone', 'location', 'website']
+  // 头像只能通过 /api/profile/avatar 上传更新，忽略客户端传入的 avatar，避免覆盖内部 object key
+  const fields = ['nickname', 'bio', 'goal', 'email', 'phone', 'location', 'website']
   const data = Object.fromEntries(fields.map((f) => [f, typeof b[f] === 'string' ? b[f] : '']))
   await c.env.DB.prepare(
     `INSERT INTO profile (user_id, nickname, avatar, bio, goal, email, phone, location, website)
      VALUES (?,?,?,?,?,?,?,?,?)
      ON CONFLICT(user_id) DO UPDATE SET
-       nickname = excluded.nickname, avatar = excluded.avatar, bio = excluded.bio,
+       nickname = excluded.nickname, bio = excluded.bio,
        goal = excluded.goal, email = excluded.email, phone = excluded.phone,
        location = excluded.location, website = excluded.website,
        updated_at = datetime('now')`
   ).bind(
-    uid, data.nickname, data.avatar, data.bio, data.goal,
+    uid, data.nickname, '', data.bio, data.goal,
     data.email, data.phone, data.location, data.website
   ).run()
-  return c.json({ ok: true })
+  const row = await c.env.DB.prepare('SELECT * FROM profile WHERE user_id = ?').bind(uid).first<ProfileRow>()
+  return c.json({ ok: true, avatar: toClientAvatar(row?.avatar, row?.updated_at) })
+})
+
+type ProfileRow = {
+  user_id: string
+  nickname: string
+  avatar: string
+  bio: string
+  goal: string
+  email: string
+  phone: string
+  location: string
+  website: string
+  updated_at?: string
+}
+
+async function readAvatarUpload(c: { req: { header: (name: string) => string | undefined; formData: () => Promise<FormData>; arrayBuffer: () => Promise<ArrayBuffer> } }): Promise<
+  | { ok: true; bytes: Uint8Array; declaredType: string }
+  | { ok: false; status: 400 | 413 | 415; error: string }
+> {
+  if (requestLooksTooLarge(c.req.header('content-length'))) {
+    return { ok: false, status: 413, error: '文件过大，最大 5MB' }
+  }
+  const contentType = c.req.header('content-type') ?? ''
+  if (contentType.toLowerCase().includes('multipart/form-data')) {
+    const form = await c.req.formData()
+    const file = form.get('file') ?? form.get('avatar')
+    if (!(file instanceof File)) {
+      return { ok: false, status: 400, error: '请选择要上传的图片' }
+    }
+    if (file.size > AVATAR_MAX_BYTES) {
+      return { ok: false, status: 413, error: '文件过大，最大 5MB' }
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    return { ok: true, bytes, declaredType: file.type }
+  }
+  const declaredType = contentType.split(';')[0].trim()
+  const bytes = new Uint8Array(await c.req.arrayBuffer())
+  return { ok: true, bytes, declaredType }
+}
+
+// 头像：写入已声明的 NOTES 桶（key 前缀 avatars/{user}/），读取走授权接口，不接受客户端指定 object key
+app.post('/api/profile/avatar', async (c) => {
+  const uid = c.get('userId')
+  const uploaded = await readAvatarUpload(c)
+  if (!uploaded.ok) return c.json({ error: uploaded.error }, uploaded.status)
+
+  const inspected = inspectAvatarUpload({ bytes: uploaded.bytes, declaredType: uploaded.declaredType })
+  if (!inspected.ok) return c.json({ error: inspected.error }, inspected.status)
+
+  const key = buildAvatarKey(uid, inspected.ext)
+  const existing = await c.env.DB.prepare('SELECT avatar FROM profile WHERE user_id = ?')
+    .bind(uid).first<{ avatar: string }>()
+  const previousKey = existing?.avatar ?? ''
+
+  await c.env.NOTES.put(key, uploaded.bytes, {
+    httpMetadata: {
+      contentType: inspected.contentType,
+      contentDisposition: 'inline',
+      cacheControl: 'private, max-age=3600',
+    },
+    customMetadata: { userId: uid },
+  })
+
+  await c.env.DB.prepare(
+    `INSERT INTO profile (user_id, avatar, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(user_id) DO UPDATE SET
+       avatar = excluded.avatar,
+       updated_at = datetime('now')`
+  ).bind(uid, key).run()
+
+  if (previousKey && isOwnedAvatarKey(previousKey, uid) && previousKey !== key) {
+    await c.env.NOTES.delete(previousKey)
+  }
+
+  const row = await c.env.DB.prepare('SELECT avatar, updated_at FROM profile WHERE user_id = ?')
+    .bind(uid).first<{ avatar: string; updated_at: string }>()
+  return c.json({ avatar: publicAvatarUrl(row?.updated_at) })
+})
+
+app.get('/api/profile/avatar', async (c) => {
+  const uid = c.get('userId')
+  const row = await c.env.DB.prepare('SELECT avatar FROM profile WHERE user_id = ?')
+    .bind(uid).first<{ avatar: string }>()
+  const key = row?.avatar ?? ''
+  // 只使用当前用户资料中的服务端 key，忽略查询参数中的任何 object key
+  if (!isOwnedAvatarKey(key, uid)) return c.json({ error: '未找到头像' }, 404)
+
+  const object = await c.env.NOTES.get(key)
+  if (!object) return c.json({ error: '未找到头像' }, 404)
+
+  const headers = new Headers()
+  object.writeHttpMetadata(headers)
+  headers.set('etag', object.httpEtag)
+  headers.set('Cache-Control', 'private, max-age=3600')
+  headers.set('X-Content-Type-Options', 'nosniff')
+  headers.set('Content-Disposition', 'inline')
+  return new Response(object.body, { status: 200, headers })
 })
 
 async function bustStatsCache(kv: KVNamespace, uid: string) {
