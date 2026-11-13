@@ -9,6 +9,14 @@ export type GraphDraft = {
   edges: { source: string; target: string; type: 'prerequisite' | 'related' | 'extend' }[]
 }
 
+// 多轮对话消息：会话历史由前端持有，后端保持无状态
+export type ChatTurn = { role: 'user' | 'assistant'; content: string }
+// 一轮对话的产物：修订后的完整草稿 + 给用户的自然语言说明
+export type GraphDraftResult = { draft: GraphDraft; reply: string }
+
+const MAX_DRAFT_NODES = 30
+const MAX_DRAFT_EDGES = 100
+
 // 领域清单（与 domains 表保持一致；此处为兜底默认，构建图谱时优先读 DB）
 const DOMAINS = ['ai-ml', 'backend', 'frontend', 'data', 'devops', 'cs-basic', 'security', 'product'] as const
 
@@ -196,69 +204,166 @@ function slugify(s: string): string {
 }
 
 /**
- * 根据一句话主题，分析拆解并联网搜索，生成知识图谱草稿。
- * 流程：LLM 拆解主题 → 对核心主题联网搜索补充 → LLM 生成结构化节点/边。
+ * 把任意来源（LLM 输出或客户端回传）的草稿规范化为可安全落库的结构。
+ * 客户端回传的 draft 一律视为不可信：限制规模、枚举白名单、过滤自环与 orphan edge；
+ * 与已有节点 id 冲突时自动重命名并同步 remap 边的端点，避免 INSERT OR IGNORE 静默丢节点。
  */
-export async function buildGraphDraft(env: EnvWithSearch, topic: string): Promise<GraphDraft> {
+export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new Set()): GraphDraft {
+  const input = (raw ?? {}) as { nodes?: unknown; edges?: unknown }
+  const rawNodes = Array.isArray(input.nodes) ? input.nodes.slice(0, MAX_DRAFT_NODES) : []
+  const rawEdges = Array.isArray(input.edges) ? input.edges.slice(0, MAX_DRAFT_EDGES) : []
+
+  const used = new Set(existingIds)
+  const idMap = new Map<string, string>()
+  const seenOriginal = new Set<string>()
+  const nodes: GraphDraft['nodes'] = []
+
+  rawNodes.forEach((item, i) => {
+    const n = (item ?? {}) as Record<string, unknown>
+    const name = String(n.name ?? '').trim().slice(0, 60)
+    if (!name) return
+    const originalId = String(n.id ?? '').trim()
+    // 模型偶发重复 id 时，第二个节点改用名称生成独立 id，避免产生无法被边引用的孤岛
+    const duplicated = !!originalId && seenOriginal.has(originalId)
+    let base = slugify((duplicated ? '' : originalId) || name)
+    if (!base) base = `node-${i + 1}`
+    if (originalId) seenOriginal.add(originalId)
+    let id = base
+    let suffix = 2
+    while (used.has(id)) id = `${base}-${suffix++}`
+    used.add(id)
+    // 边可能引用 LLM 原始 id、规范化后的 id 或上一轮清洗后的最终 id，三者都建立映射
+    for (const key of [originalId, base, id]) {
+      if (key && !idMap.has(key)) idMap.set(key, id)
+    }
+    const level = Number(n.level)
+    const domain = String(n.domain ?? '')
+    nodes.push({
+      id,
+      name,
+      domain: DOMAINS.includes(domain as (typeof DOMAINS)[number]) ? domain : 'cs-basic',
+      level: [1, 2, 3].includes(level) ? level : 1,
+      tags: Array.isArray(n.tags)
+        ? n.tags.map((t) => String(t).trim().slice(0, 40)).filter(Boolean).slice(0, 8)
+        : [],
+    })
+  })
+
+  const newIds = new Set(nodes.map((n) => n.id))
+  // 端点只允许引用本次草稿节点，与前端预览图口径完全一致：
+  // 不引用已有节点 id，避免「预览不可见但落库生效」的幽灵连线。
+  const remap = (raw: string): string => {
+    const mapped = idMap.get(raw)
+    if (mapped) return mapped
+    if (newIds.has(raw)) return raw
+    return ''
+  }
+  const seen = new Set<string>()
+  const edges: GraphDraft['edges'] = []
+  for (const item of rawEdges) {
+    const e = (item ?? {}) as Record<string, unknown>
+    const source = remap(String(e.source ?? '').trim())
+    const target = remap(String(e.target ?? '').trim())
+    if (!source || !target || source === target) continue
+    const key = `${source}|${target}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const t = String(e.type ?? '')
+    edges.push({
+      source,
+      target,
+      type: (['prerequisite', 'related', 'extend'].includes(t) ? t : 'related') as GraphDraft['edges'][number]['type'],
+    })
+  }
+  return { nodes, edges }
+}
+
+/**
+ * 根据一句话主题，联网搜索并生成知识图谱草稿（不落库）。
+ * existingNames 用于提示模型避开用户图谱里已有的知识点。
+ */
+export async function buildGraphDraft(
+  env: EnvWithSearch,
+  topic: string,
+  existingNames: string[] = []
+): Promise<GraphDraft> {
   const searchHits = await webSearch(env, topic, 5)
   const searchText = searchHits
     .slice(0, 5)
     .map((it, i) => `${i + 1}. ${it.title}\n   ${it.description ?? ''}`)
     .join('\n')
 
-  const prompt = `你是一名学习路线规划专家。请根据主题「${topic}」构建一个知识图谱。
+  const existingHint = existingNames.length
+    ? `\n用户图谱中已有的知识点（请避免重复；若确需深化，请使用更具体的名称）：\n${existingNames.slice(0, 80).map((n) => `- ${n}`).join('\n')}\n`
+    : ''
+
+  const prompt = `你是一名学习路线规划专家。请根据主题「${topic}」构建一份待用户确认的知识图谱草稿。
 
 ${searchText ? `以下是联网搜索到的相关背景信息，供你参考：\n${searchText}\n` : ''}
-
+${existingHint}
 要求：
 1. 拆解出 6~12 个核心知识点作为节点，覆盖从入门到进阶的完整学习路径。
 2. 每个节点包含：id（英文或拼音 slug）、name（中文名）、domain（领域，从下面清单选最匹配的一个）、level（1入门/2进阶/3高级）、tags（标签数组，用于二级细分，可含具体技术如 java、llm、spring）。
 3. 领域清单（只能选其一）：
 ${Object.entries(DOMAIN_NAMES).map(([k, v]) => `   - ${k}（${v}）`).join('\n')}
 4. 节点之间用边连接，表示学习依赖关系：prerequisite（前置）、related（相关）、extend（扩展）。
-5. 边要有明确的前置依赖链，形成合理的学习顺序。
+5. 边要有明确的前置依赖链，形成合理的学习顺序；边的端点必须是本次 nodes 里的 id。
 6. 注意：领域是学科粗分类，交叉方向用 tags 表达（如「Java 做 AI」应归 backend 或 ai-ml，并用 tags 标注 java + llm，不要发明新领域）。
 
 只输出 JSON，不要任何解释，格式如下：
 {"nodes":[{"id":"...","name":"...","domain":"...","level":1,"tags":["..."]}],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
 
   const raw = await chat(env, [{ role: 'user', content: prompt }], 4000)
-  const parsed = extractJson(raw) as GraphDraft | null
-  if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-    throw new Error('模型未能生成有效的图谱结构')
-  }
+  const draft = sanitizeGraphDraft(extractJson(raw))
+  if (!draft.nodes.length) throw new Error('模型未能生成有效的图谱结构')
+  return draft
+}
 
-  // 规范化节点
-  const seen = new Set<string>()
-  const nodes = parsed.nodes
-    .filter((n) => n && n.name)
-    .map((n) => {
-      let id = slugify(n.id || n.name)
-      if (!id) id = 'node-' + Math.random().toString(36).slice(2, 8)
-      // 去重
-      let uniqueId = id
-      let i = 1
-      while (seen.has(uniqueId)) uniqueId = `${id}-${++i}`
-      seen.add(uniqueId)
-      return {
-        id: uniqueId,
-        name: n.name,
-        domain: (DOMAINS.includes(n.domain as (typeof DOMAINS)[number]) ? n.domain : 'cs-basic'),
-        level: [1, 2, 3].includes(n.level) ? n.level : 1,
-        tags: Array.isArray(n.tags) ? n.tags.map(String).slice(0, 8) : [],
-      }
-    })
+/**
+ * 多轮对话修订：基于当前草稿 + 完整对话历史，按用户最新意见产出「完整的新草稿」。
+ * 不做联网搜索（修订阶段依赖对话上下文即可），失败时上层保留原草稿。
+ */
+export async function reviseGraphDraft(
+  env: EnvWithSearch,
+  draft: GraphDraft,
+  messages: ChatTurn[],
+  existingNames: string[] = []
+): Promise<GraphDraftResult> {
+  const history = messages
+    .slice(-12)
+    .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.content.slice(0, 1200)}`)
+    .join('\n')
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
 
-  const nodeIds = new Set(nodes.map((n) => n.id))
-  const edges = parsed.edges
-    .filter((e) => e && nodeIds.has(e.source) && nodeIds.has(e.target) && e.source !== e.target)
-    .map((e) => ({
-      source: e.source,
-      target: e.target,
-      type: (['prerequisite', 'related', 'extend'].includes(e.type) ? e.type : 'related') as GraphDraft['edges'][number]['type'],
-    }))
+  const prompt = `你是学习路线规划专家，正在与用户共同敲定一份知识图谱草稿。
 
-  return { nodes, edges }
+【当前草稿（JSON）】
+${JSON.stringify(draft)}
+
+【用户图谱已有知识点（避免重复）】
+${existingNames.length ? existingNames.slice(0, 80).join('、') : '（无）'}
+
+【对话记录】
+${history}
+
+请根据用户最新意见「${lastUser.slice(0, 1000)}」修订草稿。要求：
+1. 输出「完整的新草稿」，不是增量 diff；保留用户未提及的合理部分，只按意见增删改节点或连线。
+2. 节点 6~20 个，字段为 id / name / domain / level / tags；domain 只能是 ${DOMAINS.join(' / ')} 之一。
+3. 边表示学习依赖（prerequisite / related / extend），端点必须是本次 nodes 里的 id，不要引用已有节点 id。
+4. reply 用一句中文简述本次改动，不要 markdown、不要复述 JSON。
+5. 只输出 JSON，格式：{"reply":"...","nodes":[...],"edges":[...]}`
+
+  const raw = await chat(env, [
+    { role: 'system', content: '你是学习路线规划专家，只输出严格合法的 JSON，不要任何解释文字。' },
+    { role: 'user', content: prompt },
+  ], 4000)
+  const parsed = extractJson(raw) as { reply?: unknown; nodes?: unknown; edges?: unknown } | null
+  if (!parsed) throw new Error('模型未能生成有效的修订草稿，请换一种说法再试')
+
+  const next = sanitizeGraphDraft({ nodes: parsed.nodes, edges: parsed.edges })
+  if (!next.nodes.length) throw new Error('修订后的草稿为空，请重新描述你的需求')
+  const reply = String(parsed.reply ?? '').trim().slice(0, 300) || '已按你的建议更新图谱草稿'
+  return { draft: next, reply }
 }
 
 /**

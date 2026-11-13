@@ -52,6 +52,8 @@ export default function ProfileView() {
     try {
       await api.saveProfile(profile)
       setSaved(true)
+      // 侧栏优先显示昵称，资料保存后通知 App 立即刷新
+      window.dispatchEvent(new Event('app:profile-updated'))
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : '保存失败')
     } finally {

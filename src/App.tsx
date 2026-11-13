@@ -22,12 +22,14 @@ const navItems = [
 export default function App() {
   const [authStatus, setAuthStatus] = useState<'loading' | 'authed' | 'guest'>('loading')
   const [email, setEmail] = useState('')
+  const [nickname, setNickname] = useState('')
 
   const checkAuth = useCallback(async () => {
     try {
       const me = await api.authMe()
       if (me.authenticated) {
         setEmail(me.email)
+        setNickname(me.nickname ?? '')
         setAuthStatus('authed')
       } else {
         setAuthStatus('guest')
@@ -43,15 +45,31 @@ export default function App() {
     checkAuth()
   }, [checkAuth])
 
-  // 任意 API 返回 401（会话过期）时统一回到登录页
+  // 资料保存后只刷新昵称：不重判登录态，网络抖动时也不会把用户踢回登录页
+  const refreshIdentity = useCallback(async () => {
+    try {
+      const me = await api.authMe()
+      if (me.authenticated) setNickname(me.nickname ?? '')
+    } catch {
+      // 保留当前昵称与登录态
+    }
+  }, [])
+
+  // 任意 API 返回 401（会话过期）时统一回到登录页；资料页保存昵称后立即刷新侧栏显示
   useEffect(() => {
     const onUnauthorized = () => {
       setAuthStatus('guest')
       setEmail('')
+      setNickname('')
     }
+    const onProfileUpdated = () => { void refreshIdentity() }
     window.addEventListener('app:unauthorized', onUnauthorized)
-    return () => window.removeEventListener('app:unauthorized', onUnauthorized)
-  }, [])
+    window.addEventListener('app:profile-updated', onProfileUpdated)
+    return () => {
+      window.removeEventListener('app:unauthorized', onUnauthorized)
+      window.removeEventListener('app:profile-updated', onProfileUpdated)
+    }
+  }, [refreshIdentity])
 
   const logout = async () => {
     try {
@@ -59,6 +77,7 @@ export default function App() {
     } finally {
       setAuthStatus('guest')
       setEmail('')
+      setNickname('')
     }
   }
 
@@ -97,7 +116,9 @@ export default function App() {
           ))}
         </nav>
         <div className="border-t border-border px-3 pt-3">
-          <p className="mb-2 truncate text-xs text-muted-foreground">{email}</p>
+          <p className="mb-2 truncate text-xs text-muted-foreground" title={email}>
+            {nickname.trim() || email}
+          </p>
           <button
             onClick={logout}
             className="text-xs text-muted-foreground transition-colors hover:text-foreground"

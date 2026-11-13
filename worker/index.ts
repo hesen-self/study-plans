@@ -9,7 +9,17 @@ import {
   requestLooksTooLarge,
   toClientAvatar,
 } from './avatar.ts'
-import { buildGraphDraft, classifyDomain, generateNodeLesson, generateNodeLessonStream, webSearch } from './agent.ts'
+import {
+  buildGraphDraft,
+  classifyDomain,
+  generateNodeLesson,
+  generateNodeLessonStream,
+  reviseGraphDraft,
+  sanitizeGraphDraft,
+  webSearch,
+  type ChatTurn,
+  type GraphDraft,
+} from './agent.ts'
 import { nextSnowflakeId } from './snowflake.ts'
 import {
   COOKIE_NAME,
@@ -641,12 +651,23 @@ app.get('/api/auth/github/callback', async (c) => {
   return c.redirect('/?auth=success', 302)
 })
 
-// 当前登录状态
+// 当前登录状态（nickname 供侧栏优先显示，未设置时前端回退邮箱）
 app.get('/api/auth/me', async (c) => {
   const uid = c.get('userId')
   const email = c.get('email')
   const authenticated = uid !== DEFAULT_USER_ID
-  return c.json({ authenticated, user_id: uid, email })
+  let nickname = ''
+  if (authenticated) {
+    try {
+      const row = await c.env.DB.prepare('SELECT nickname FROM users WHERE id = ?')
+        .bind(uid).first<{ nickname: string | null }>()
+      nickname = (row?.nickname ?? '').trim()
+    } catch (e) {
+      // 昵称查询失败不能影响登录态判定，降级为显示邮箱
+      console.error('auth/me nickname lookup failed', e)
+    }
+  }
+  return c.json({ authenticated, user_id: uid, email, nickname })
 })
 
 // 退出登录
@@ -1004,24 +1025,86 @@ app.post('/api/agent/classify-domain', async (c) => {
   return c.json({ domain })
 })
 
-app.post('/api/agent/build-graph', async (c) => {
+// 多轮对话生成 / 修订图谱草稿：纯计算，不写库。
+// 会话历史与当前草稿由前端持有并回传，后端无状态；任何输入都经 sanitizeGraphDraft 规范化。
+type GraphDraftBody = { messages?: ChatTurn[]; draft?: GraphDraft | null }
+
+app.post('/api/agent/graph-draft', async (c) => {
   const uid = c.get('userId')
-  const { topic } = await c.req.json<{ topic: string }>()
-  if (!topic?.trim()) return c.json({ error: '请输入主题' }, 400)
+  if (Number(c.req.header('content-length') ?? '0') > 64 * 1024) {
+    return c.json({ error: '请求内容过大' }, 413)
+  }
+  const b: GraphDraftBody = (await c.req.json<GraphDraftBody>().catch(() => null)) ?? {}
+  // 先截断再过滤，避免超大 messages 数组带来的无谓遍历
+  const messages = (Array.isArray(b.messages) ? b.messages.slice(-12) : [])
+    .filter((m): m is ChatTurn =>
+      !!m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+    )
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 1500) }))
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+  if (!lastUser?.content.trim()) return c.json({ error: '请输入主题或修改建议' }, 400)
 
   try {
-    const draft = await buildGraphDraft(c.env, topic.trim())
-    if (!draft.nodes.length) return c.json({ error: '未生成任何节点' }, 500)
+    const existing = await c.env.DB.prepare('SELECT id, name FROM nodes WHERE user_id = ?')
+      .bind(uid).all<{ id: string; name: string }>()
+    const rows = existing.results ?? []
+    const existingIds = new Set(rows.map((r) => r.id))
+    const existingNames = rows.map((r) => r.name)
 
-    // 写入节点（忽略已存在的 id，避免主键冲突）
+    let result: { draft: GraphDraft; reply: string }
+    if (b.draft && Array.isArray(b.draft.nodes) && b.draft.nodes.length) {
+      // 修订：先清洗客户端回传的草稿，再连同多轮历史交给模型
+      const current = sanitizeGraphDraft(b.draft)
+      result = await reviseGraphDraft(c.env, current, messages, existingNames)
+    } else {
+      // 首轮：联网搜索 + 拆解主题
+      const draft = await buildGraphDraft(c.env, lastUser.content.trim(), existingNames)
+      result = {
+        draft,
+        reply: `已生成 ${draft.nodes.length} 个知识点、${draft.edges.length} 条依赖关系。先看看预览，不满意就直接告诉我怎么改。`,
+      }
+    }
+    // 统一避开已有节点 id（含边 remap），保证确认新建时不会被 INSERT OR IGNORE 静默跳过
+    const draft = sanitizeGraphDraft(result.draft, existingIds)
+    return c.json({ draft, reply: result.reply })
+  } catch (e) {
+    console.error('graph-draft failed', e)
+    return c.json({ error: e instanceof Error ? e.message : '生成草稿失败' }, 500)
+  }
+})
+
+// 用户确认预览后正式新建：客户端回传的 draft 一律视为不可信，重新清洗校验后再落库
+app.post('/api/agent/build-graph', async (c) => {
+  const uid = c.get('userId')
+  if (Number(c.req.header('content-length') ?? '0') > 128 * 1024) {
+    return c.json({ error: '草稿内容过大' }, 413)
+  }
+  const b = await c.req.json<{ draft?: unknown }>().catch(() => null)
+  if (!b?.draft || typeof b.draft !== 'object') {
+    return c.json({ error: '请先生成并确认预览图谱' }, 400)
+  }
+
+  try {
+    const existing = await c.env.DB.prepare('SELECT id FROM nodes WHERE user_id = ?')
+      .bind(uid).all<{ id: string }>()
+    const draft = sanitizeGraphDraft(b.draft, new Set((existing.results ?? []).map((r) => r.id)))
+    if (!draft.nodes.length) return c.json({ error: '草稿中没有可新建的节点' }, 400)
+
+    // 写入节点（id 已避开存量，不会与主键冲突）
     const nodeStmts = draft.nodes.map((n) =>
       c.env.DB.prepare(
         'INSERT OR IGNORE INTO nodes (id, user_id, name, domain, level, status, progress, tags) VALUES (?,?,?,?,?,?,?,?)'
       ).bind(n.id, uid, n.name, n.domain, n.level, 'todo', 0, JSON.stringify(n.tags))
     )
     await c.env.DB.batch(nodeStmts)
+    // 回查实际落库数量：并发窗口下 INSERT OR IGNORE 可能跳过节点，避免虚报「已新建」
+    const placeholders = draft.nodes.map(() => '?').join(',')
+    const verified = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM nodes WHERE user_id = ? AND id IN (${placeholders})`
+    ).bind(uid, ...draft.nodes.map((n) => n.id)).first<{ c: number }>()
+    const inserted = verified?.c ?? draft.nodes.length
 
-    // 写入边：两端节点必须真实存在于当前用户图谱（含 INSERT OR IGNORE 命中的存量节点）。
+    // 写入边：两端节点必须真实存在于当前用户图谱（含已有节点）。
     // 过滤自环、重复边与 orphan edge，避免 G6 报 Node not found
     const [existingEdges, allNodes] = await Promise.all([
       c.env.DB.prepare('SELECT source, target FROM edges WHERE user_id = ?').bind(uid).all(),
@@ -1042,7 +1125,7 @@ app.post('/api/agent/build-graph', async (c) => {
     }
     if (edgeStmts.length) await c.env.DB.batch(edgeStmts)
 
-    return c.json({ ok: true, nodes: draft.nodes.length, edges: edgeStmts.length })
+    return c.json({ ok: true, nodes: inserted, edges: edgeStmts.length })
   } catch (e) {
     console.error('build-graph failed', e)
     return c.json({ error: e instanceof Error ? e.message : '构建图谱失败' }, 500)

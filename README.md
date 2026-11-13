@@ -10,8 +10,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| 知识图谱 | 四大领域（AI 通用 / Java+AI / 前端Web / 计算机基础）知识点可视化，力导向图布局，支持增删改查、领域着色、状态/等级样式 |
+| 知识图谱 | 8 类可配置领域的知识点可视化，力导向图布局，支持增删改查、领域着色、状态/等级样式 |
 | 节点管理 | 新建 / 编辑 / 删除节点与连线，字段含名称、领域、等级、标签；删除节点自动级联清理关联数据 |
+| AI 助手 | 多轮对话构建图谱：先给出 G6 预览草稿，可反复提修改意见，确认后才正式新建；联网搜索结果可一键收藏为资源 |
 | 学习路线 | 预置 / 自定义路线，步骤排序、整体替换，可视化步骤流 |
 | 打卡统计 | 日历热力图、领域饼图、周时长柱状图、连续打卡天数；KV 缓存聚合结果 |
 | 笔记资源 | 每个知识点 Markdown 笔记（marked 渲染）+ 资源链接（文档/视频/仓库/文章） |
@@ -188,6 +189,11 @@ npm run dev
 | GET | `/api/knowledge/jobs/active` · `/:id` | 恢复任务 / 查询进度 |
 | POST | `/api/knowledge/jobs/:id/cancel` · `/resume` | 取消 / 断点续跑 |
 | PATCH | `/api/knowledge/:nodeId` | 人工编辑教材（置 `is_edited`） |
+| POST | `/api/agent/graph-draft` | 多轮对话生成 / 修订图谱预览草稿（**不落库**） |
+| POST | `/api/agent/build-graph` | 确认预览后正式新建（服务端重新清洗校验 draft） |
+| GET | `/api/auth/me` | 登录态（含 `nickname`，侧栏优先显示昵称、未设置回退邮箱） |
+
+`/api/agent/graph-draft` 为无状态接口：前端持有 `messages`（最近 12 轮）与当前 `draft` 并回传；首轮联网搜索 + 拆解主题，后续按用户意见产出**完整的新草稿**（不是增量 diff）。草稿只存在于浏览器 `sessionStorage`，关闭面板再打开可继续对话；只有点击「确认新建」才会写库，且服务端会重新执行规模限制、枚举白名单、id 冲突重命名（同步 remap 边）、自环 / orphan edge 过滤。
 
 所有 `/api/*` 接口均按当前登录用户（`user_id`）做数据隔离；除 `/api/auth/*` 外未登录返回 401。
 
@@ -252,6 +258,7 @@ npx wrangler deploy
 - 后端遵循 Hono + D1，路由集中在 `worker/index.ts`。
 - 表结构变更需新增迁移文件，禁止修改已执行的迁移。
 - 提交前 `npm run lint` 需 0 error。
+- `npm test` 跑纯函数测试（图谱草稿规范化）；`npm run test:avatar` 为历史集成测试，依赖 Cloudflare runtime 的 `cloudflare:sockets` 与旧版 Access 头，Node 下不可直接运行。
 
 ---
 

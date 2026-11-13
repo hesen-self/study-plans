@@ -53,6 +53,28 @@ export interface Resource {
   kind: 'doc' | 'video' | 'repo' | 'article'
 }
 
+// AI 助手多轮对话构建图谱：草稿只在前端流转，用户确认后才落库
+export interface GraphDraftNode {
+  id: string
+  name: string
+  domain: string
+  level: number
+  tags: string[]
+}
+export interface GraphDraftEdge {
+  source: string
+  target: string
+  type: 'prerequisite' | 'related' | 'extend'
+}
+export interface GraphDraft {
+  nodes: GraphDraftNode[]
+  edges: GraphDraftEdge[]
+}
+export interface ChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export interface Profile {
   user_id: string
   nickname: string
@@ -249,11 +271,15 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ query, limit }) }
     ),
 
-  // 一句话构建知识图谱
-  buildGraph: (topic: string) =>
+  // 多轮对话生成 / 修订图谱草稿（不落库，返回预览草稿与助手说明）
+  graphDraft: (body: { messages: ChatTurn[]; draft?: GraphDraft | null }) =>
+    req<{ draft: GraphDraft; reply: string }>('/api/agent/graph-draft', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  // 确认预览后正式新建（服务端会重新清洗校验 draft，不信任客户端数据）
+  applyGraphDraft: (draft: GraphDraft) =>
     req<{ ok: boolean; nodes: number; edges: number }>('/api/agent/build-graph', {
-      method: 'POST',
-      body: JSON.stringify({ topic }),
+      method: 'POST', body: JSON.stringify({ draft }),
     }),
 
   // 知识库教材
@@ -327,7 +353,8 @@ export const api = {
   },
 
   // 认证（应用层自建登录）
-  authMe: () => req<{ authenticated: boolean; user_id: string; email: string }>('/api/auth/me'),
+  authMe: () =>
+    req<{ authenticated: boolean; user_id: string; email: string; nickname?: string }>('/api/auth/me'),
   sendCode: (email: string) =>
     req<{ ok: boolean }>('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) }),
   verifyCode: (email: string, code: string) =>
