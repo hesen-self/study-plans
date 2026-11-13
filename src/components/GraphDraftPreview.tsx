@@ -1,13 +1,19 @@
 import { useEffect, useRef } from 'react'
 import { Graph, GraphData } from '@antv/g6'
-import { DOMAIN_COLOR, GraphDraft } from '@/api'
+import { Domain, domainColorOf, GraphDraft } from '@/api'
 
 /**
  * AI 图谱草稿预览（只读）。
  * 遵循 AGENTS.md：草稿变化 = 节点集合替换，必须销毁并重建 Graph 实例，
  * 禁止用 setData 做增量更新，否则 d3-force 会节点堆叠或抛 Node not found。
  */
-export default function GraphDraftPreview({ draft }: { draft: GraphDraft }) {
+export default function GraphDraftPreview({
+  draft,
+  domains = [],
+}: {
+  draft: GraphDraft
+  domains?: Domain[]
+}) {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -17,7 +23,7 @@ export default function GraphDraftPreview({ draft }: { draft: GraphDraft }) {
       nodes: draft.nodes.map((n) => ({
         id: n.id,
         style: {
-          fill: DOMAIN_COLOR[n.domain] ?? '#888780',
+          fill: domainColorOf(n.domain, domains),
           size: 12 + n.level * 5,
           labelText: n.name,
           labelFill: '#1c1b18',
@@ -57,7 +63,7 @@ export default function GraphDraftPreview({ draft }: { draft: GraphDraft }) {
     return () => {
       try { graph.destroy() } catch { /* 忽略销毁异常 */ }
     }
-  }, [draft])
+  }, [draft, domains])
 
   return (
     <div className="space-y-2">

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Graph, GraphData, IElementEvent } from '@antv/g6'
 import { api, DOMAIN_COLOR, Domain, Edge, Node } from '@/api'
 import NodeDrawer from '@/components/NodeDrawer'
@@ -20,8 +21,11 @@ interface SemanticHit {
 }
 
 export default function GraphView() {
+  const [searchParams] = useSearchParams()
   const ref = useRef<HTMLDivElement>(null)
   const graphRef = useRef<Graph | null>(null)
+  // 保存 render() 的 Promise：视口聚焦必须等元素控制器就绪后再执行
+  const renderPromiseRef = useRef<Promise<void> | null>(null)
   const [nodes, setNodes] = useState<Node[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
   const [domains, setDomains] = useState<Domain[]>([])
@@ -35,9 +39,31 @@ export default function GraphView() {
   const [editingNode, setEditingNode] = useState<Node | null>(null)
   const [showEdgeEditor, setShowEdgeEditor] = useState(false)
   const [showAgent, setShowAgent] = useState(false)
+  // URL 定位与视口聚焦：首次失败可重试；用户主动关闭抽屉后不再弹回；聚焦只做一次
+  const urlLocatedRef = useRef(false)
+  const drawerDismissedRef = useRef(false)
+  const urlFocusRef = useRef<string | null>(null)
+  const urlFocusDoneRef = useRef(false)
 
-  const load = () => api.graph().then((d) => { setNodes(d.nodes); setEdges(d.edges) })
-  useEffect(() => { load() }, [])
+  const load = useCallback(() => {
+    // 只在「尚未成功定位」且「用户没主动关掉抽屉」时读 URL；
+    // 首次请求失败不置位，后续 load 会自动补做定位
+    const target = !urlLocatedRef.current && !drawerDismissedRef.current
+      ? searchParams.get('node')
+      : null
+    return api.graph()
+      .then((d) => {
+        setNodes(d.nodes)
+        setEdges(d.edges)
+        if (target && d.nodes.some((n) => n.id === target)) {
+          urlLocatedRef.current = true
+          urlFocusRef.current = target
+          setSelected(target)
+        }
+      })
+      .catch(() => { /* 加载失败保留现有图谱，避免 unhandled rejection */ })
+  }, [searchParams])
+  useEffect(() => { void load() }, [load])
 
   // 加载领域清单（图例与过滤选项用）
   useEffect(() => {
@@ -120,15 +146,35 @@ export default function GraphView() {
       const id = (e.target as { id?: string }).id
       if (id) setSelected(id)
     })
-    graph.render()
+    // 单次调用 render；只把 Promise 存下来供视口聚焦等待，不链式调用 layout/draw
+    const rendering = graph.render()
+    void rendering.catch(() => { /* 实例被快速销毁时忽略 render 失败 */ })
+    renderPromiseRef.current = rendering
     graphRef.current = graph
     return () => {
       graphRef.current = null
+      renderPromiseRef.current = null
       try { graph.destroy() } catch { /* 忽略销毁异常 */ }
     }
     // 每次数据或领域颜色变化时重建，确保布局正确
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered, domainColorMap])
+
+  // 视口聚焦只操作已建成的实例：不触碰 render/layout 链路，也不改回 setData
+  // （AGENTS.md 第五节：筛选切换必须销毁重建，额外布局调用会产生竞态报错）
+  useEffect(() => {
+    // 只对 URL 定位的节点聚焦一次：用户点选的节点本就在视口内，
+    // 筛选切换时重复聚焦会覆盖 autoFit 的全图视图
+    if (!selected || urlFocusDoneRef.current || selected !== urlFocusRef.current) return
+    const graph = graphRef.current
+    const rendered = renderPromiseRef.current
+    if (!graph || !rendered) return
+    urlFocusDoneRef.current = true
+    // 等 render 完成后元素控制器才就绪，否则 focusElement 会静默失效
+    void rendered
+      .then(() => graph.focusElement(selected))
+      .catch(() => { /* 元素被筛选隐藏或实例已销毁时忽略 */ })
+  }, [selected, filtered])
 
   const doSemanticSearch = async () => {
     if (!semanticQ.trim()) return
@@ -249,7 +295,7 @@ export default function GraphView() {
             <h2 className="text-lg font-medium">AI 助手</h2>
             <Button variant="ghost" size="sm" onClick={() => setShowAgent(false)}>关闭</Button>
           </div>
-          <AgentPanel onBuilt={load} nodes={nodes} />
+          <AgentPanel onBuilt={load} nodes={nodes} domains={domains} />
         </div>
       )}
 
@@ -258,7 +304,7 @@ export default function GraphView() {
           key={selected}
           nodeId={selected}
           node={nodes.find((n) => n.id === selected) ?? null}
-          onClose={() => setSelected(null)}
+          onClose={() => { drawerDismissedRef.current = true; setSelected(null) }}
           onChanged={load}
         />
       )}

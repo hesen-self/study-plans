@@ -130,6 +130,7 @@ export interface KnowledgeJobItem {
 }
 
 
+/** 领域文案/颜色兜底（运行时优先用 /api/domains 已加载列表） */
 export const DOMAIN_LABEL: Record<string, string> = {
   'ai-ml': 'AI / 机器学习',
   backend: '后端开发',
@@ -139,9 +140,6 @@ export const DOMAIN_LABEL: Record<string, string> = {
   'cs-basic': '计算机基础',
   security: '安全',
   product: '产品与软技能',
-  // 兼容旧值（存量数据迁移过渡）
-  'ai-general': 'AI 通用',
-  'java-ai': 'Java + AI',
 }
 
 export const DOMAIN_COLOR: Record<string, string> = {
@@ -153,9 +151,35 @@ export const DOMAIN_COLOR: Record<string, string> = {
   'cs-basic': '#17A2B8',
   security: '#C0392B',
   product: '#7F8C8D',
-  // 兼容旧值
-  'ai-general': '#7F77DD',
-  'java-ai': '#D85A30',
+}
+
+export function domainLabelOf(id: string, domains?: Domain[]): string {
+  return domains?.find((d) => d.id === id)?.name ?? DOMAIN_LABEL[id] ?? id
+}
+
+export function domainColorOf(id: string, domains?: Domain[]): string {
+  return domains?.find((d) => d.id === id)?.color ?? DOMAIN_COLOR[id] ?? '#888780'
+}
+
+export interface WebSearchHit {
+  url: string
+  title: string
+  description?: string
+}
+
+export interface DraftConflicts {
+  willCreate: { id: string; name: string }[]
+  remapped: { from: string; to: string }[]
+  nameSimilar: { draftId: string; draftName: string; existingId: string; existingName: string }[]
+}
+
+export interface GraphDraftResponse {
+  draft: GraphDraft
+  reply: string
+  sources?: WebSearchHit[]
+  searchConfigured?: boolean
+  conflicts?: DraftConflicts
+  remaps?: { from: string; to: string }[]
 }
 
 export const STATUS_LABEL: Record<string, string> = {
@@ -266,20 +290,79 @@ export const api = {
 
   // 联网搜索
   webSearch: (query: string, limit = 5) =>
-    req<{ results: { url: string; title: string; description?: string }[] }>(
+    req<{ results: WebSearchHit[]; configured: boolean }>(
       '/api/search/web',
       { method: 'POST', body: JSON.stringify({ query, limit }) }
     ),
 
-  // 多轮对话生成 / 修订图谱草稿（不落库，返回预览草稿与助手说明）
-  graphDraft: (body: { messages: ChatTurn[]; draft?: GraphDraft | null }) =>
-    req<{ draft: GraphDraft; reply: string }>('/api/agent/graph-draft', {
+  // 多轮对话生成 / 修订图谱草稿（JSON，不落库）
+  graphDraft: (body: { messages: ChatTurn[]; draft?: GraphDraft | null; skipCache?: boolean }) =>
+    req<GraphDraftResponse>('/api/agent/graph-draft', {
       method: 'POST', body: JSON.stringify(body),
     }),
-  // 确认预览后正式新建（服务端会重新清洗校验 draft，不信任客户端数据）
-  applyGraphDraft: (draft: GraphDraft) =>
-    req<{ ok: boolean; nodes: number; edges: number }>('/api/agent/build-graph', {
-      method: 'POST', body: JSON.stringify({ draft }),
+
+  /** SSE 建图：phase → result / error；支持 AbortSignal */
+  graphDraftStream: async (
+    body: { messages: ChatTurn[]; draft?: GraphDraft | null; skipCache?: boolean },
+    handlers: {
+      onPhase?: (phase: 'searching' | 'generating') => void
+      onResult?: (r: GraphDraftResponse) => void
+      onError?: (error: string) => void
+    },
+    signal?: AbortSignal
+  ) => {
+    const r = await fetch('/api/agent/graph-draft?stream=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    })
+    if (r.status === 401) window.dispatchEvent(new Event('app:unauthorized'))
+    if (!r.ok) {
+      let message = `${r.status} ${r.statusText}`
+      try {
+        const data = (await r.json()) as { error?: string }
+        if (data.error) message = data.error
+      } catch { /* keep */ }
+      throw new Error(message)
+    }
+    const reader = r.body?.getReader()
+    if (!reader) throw new Error('浏览器不支持流式响应')
+    const dec = new TextDecoder()
+    let buf = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const chunks = buf.split('\n\n')
+      buf = chunks.pop() ?? ''
+      for (const chunk of chunks) {
+        const line = chunk.split('\n').find((l) => l.startsWith('data:'))
+        if (!line) continue
+        try {
+          const data = JSON.parse(line.slice(5).trim()) as {
+            type?: string
+            phase?: 'searching' | 'generating'
+            error?: string
+          } & GraphDraftResponse
+          if (data.type === 'phase' && data.phase) handlers.onPhase?.(data.phase)
+          else if (data.type === 'result') handlers.onResult?.(data)
+          else if (data.type === 'error') handlers.onError?.(data.error ?? '生成失败')
+        } catch { /* ignore bad event */ }
+      }
+    }
+  },
+
+  // 确认预览后正式新建；linkExisting 时按名称挂接到已有节点
+  applyGraphDraft: (draft: GraphDraft, opts?: { linkExisting?: boolean }) =>
+    req<{ ok: boolean; nodes: number; edges: number; linked?: number; conflicts?: DraftConflicts }>(
+      '/api/agent/build-graph',
+      { method: 'POST', body: JSON.stringify({ draft, linkExisting: !!opts?.linkExisting }) }
+    ),
+
+  draftToRoadmap: (draft: GraphDraft, name?: string) =>
+    req<{ ok: boolean; id: string; name: string; steps: number }>('/api/agent/draft-to-roadmap', {
+      method: 'POST', body: JSON.stringify({ draft, name }),
     }),
 
   // 知识库教材

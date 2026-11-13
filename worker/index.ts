@@ -12,12 +12,20 @@ import {
 import {
   buildGraphDraft,
   classifyDomain,
+  DEFAULT_DOMAIN_LIST,
+  draftToRoadmapSteps,
   generateNodeLesson,
   generateNodeLessonStream,
+  isSearchConfigured,
+  previewDraftConflicts,
   reviseGraphDraft,
   sanitizeGraphDraft,
+  sanitizeGraphDraftWithMeta,
+  sseData,
+  suggestLinksToExisting,
   webSearch,
   type ChatTurn,
+  type DomainInfo,
   type GraphDraft,
 } from './agent.ts'
 import { nextSnowflakeId } from './snowflake.ts'
@@ -44,6 +52,7 @@ type Bindings = AuthEnv & {
   VECTORS: VectorizeIndex
   AI: Ai
   ASSETS: Fetcher
+  TAVILY_API_KEY?: string
   // 本地开发：设为 'true' 时允许未登录请求（映射 default 用户），线上不配置即为 401
   ALLOW_ANONYMOUS?: string
   // 逗号分隔的跨域白名单；同源请求始终允许
@@ -434,6 +443,19 @@ type DomainRow = {
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
 const DOMAIN_ID = /^[a-z0-9-]{1,40}$/
+
+/** 合并模板 + 用户覆盖后的领域清单（与 GET /api/domains 口径一致） */
+async function loadUserDomains(db: D1Database, uid: string): Promise<DomainInfo[]> {
+  const r = await db.prepare('SELECT * FROM domains WHERE user_id IN (?, ?)')
+    .bind(DEFAULT_USER_ID, uid).all<DomainRow>()
+  const overrides = new Map(r.results.filter((d) => d.user_id === uid).map((d) => [d.id, d]))
+  const list = [
+    ...r.results.filter((d) => d.user_id === DEFAULT_USER_ID && !overrides.has(d.id)),
+    ...r.results.filter((d) => d.user_id === uid && !d.deleted),
+  ].map((d) => ({ id: d.id, name: d.name }))
+  list.sort((a, b) => a.id.localeCompare(b.id))
+  return list.length ? list : DEFAULT_DOMAIN_LIST
+}
 
 app.get('/api/domains', async (c) => {
   const uid = c.get('userId')
@@ -1011,23 +1033,82 @@ app.post('/api/search/semantic', async (c) => {
 // ============ 联网搜索 ============
 app.post('/api/search/web', async (c) => {
   const { query, limit } = await c.req.json<{ query: string; limit?: number }>()
-  if (!query?.trim()) return c.json({ results: [] })
+  const configured = isSearchConfigured(c.env)
+  if (!query?.trim()) return c.json({ results: [], configured })
   const items = await webSearch(c.env, query, limit ?? 5)
-  return c.json({ results: items })
+  return c.json({ results: items, configured })
 })
 
 // ============ 智能对话构建图谱 ============
-// AI 识别领域：手动创建节点时自动归类
 app.post('/api/agent/classify-domain', async (c) => {
+  const uid = c.get('userId')
   const { name, tags } = await c.req.json<{ name: string; tags?: string[] }>()
   if (!name?.trim()) return c.json({ error: '请输入知识点名称' }, 400)
-  const domain = await classifyDomain(c.env, name.trim(), tags ?? [])
+  const domains = await loadUserDomains(c.env.DB, uid)
+  const domain = await classifyDomain(c.env, name.trim(), tags ?? [], domains)
   return c.json({ domain })
 })
 
-// 多轮对话生成 / 修订图谱草稿：纯计算，不写库。
-// 会话历史与当前草稿由前端持有并回传，后端无状态；任何输入都经 sanitizeGraphDraft 规范化。
-type GraphDraftBody = { messages?: ChatTurn[]; draft?: GraphDraft | null }
+type GraphDraftBody = { messages?: ChatTurn[]; draft?: GraphDraft | null; skipCache?: boolean }
+
+async function runGraphDraft(
+  env: Bindings,
+  uid: string,
+  b: GraphDraftBody,
+  onPhase?: (phase: 'searching' | 'generating') => void
+): Promise<{
+  draft: GraphDraft
+  reply: string
+  sources: { url: string; title: string; description?: string }[]
+  searchConfigured: boolean
+  conflicts: ReturnType<typeof previewDraftConflicts>
+  remaps: { from: string; to: string }[]
+}> {
+  const messages = (Array.isArray(b.messages) ? b.messages.slice(-12) : [])
+    .filter((m): m is ChatTurn =>
+      !!m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+    )
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 1500) }))
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+  if (!lastUser?.content.trim()) throw new Error('请输入主题或修改建议')
+
+  const domains = await loadUserDomains(env.DB, uid)
+  const allowed = domains.map((d) => d.id)
+  const fb = domains.find((d) => d.id === 'cs-basic')?.id ?? domains[0]?.id ?? 'cs-basic'
+  const existing = await env.DB.prepare('SELECT id, name FROM nodes WHERE user_id = ?')
+    .bind(uid).all<{ id: string; name: string }>()
+  const rows = existing.results ?? []
+  const existingIds = new Set(rows.map((r) => r.id))
+  const existingNames = rows.map((r) => r.name)
+
+  let result: {
+    draft: GraphDraft
+    reply: string
+    sources?: { url: string; title: string; description?: string }[]
+    searchConfigured?: boolean
+  }
+  if (b.draft && Array.isArray(b.draft.nodes) && b.draft.nodes.length) {
+    onPhase?.('generating')
+    const current = sanitizeGraphDraft(b.draft, new Set(), allowed, fb)
+    result = await reviseGraphDraft(env, current, messages, existingNames, domains)
+  } else {
+    result = await buildGraphDraft(env, lastUser.content.trim(), existingNames, domains, {
+      uid,
+      skipCache: !!b.skipCache,
+      onPhase,
+    })
+  }
+  const meta = sanitizeGraphDraftWithMeta(result.draft, existingIds, allowed, fb)
+  const conflicts = previewDraftConflicts(meta.draft, rows, meta.remaps)
+  return {
+    draft: meta.draft,
+    reply: result.reply,
+    sources: result.sources ?? [],
+    searchConfigured: result.searchConfigured ?? isSearchConfigured(env),
+    conflicts,
+    remaps: meta.remaps,
+  }
+}
 
 app.post('/api/agent/graph-draft', async (c) => {
   const uid = c.get('userId')
@@ -1035,77 +1116,85 @@ app.post('/api/agent/graph-draft', async (c) => {
     return c.json({ error: '请求内容过大' }, 413)
   }
   const b: GraphDraftBody = (await c.req.json<GraphDraftBody>().catch(() => null)) ?? {}
-  // 先截断再过滤，避免超大 messages 数组带来的无谓遍历
-  const messages = (Array.isArray(b.messages) ? b.messages.slice(-12) : [])
-    .filter((m): m is ChatTurn =>
-      !!m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
-    )
-    .map((m) => ({ role: m.role, content: m.content.slice(0, 1500) }))
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user')
-  if (!lastUser?.content.trim()) return c.json({ error: '请输入主题或修改建议' }, 400)
+  const wantsStream = c.req.query('stream') === '1'
+    || (c.req.header('accept') ?? '').includes('text/event-stream')
+
+  if (wantsStream) {
+    const { readable, writable } = new TransformStream()
+    const writer = writable.getWriter()
+    const enc = new TextEncoder()
+    const send = async (obj: unknown) => {
+      await writer.write(enc.encode(sseData(obj)))
+    }
+    c.executionCtx.waitUntil((async () => {
+      try {
+        const out = await runGraphDraft(c.env, uid, b, async (phase) => {
+          await send({ type: 'phase', phase })
+        })
+        await send({ type: 'result', ...out })
+      } catch (e) {
+        console.error('graph-draft stream failed', e)
+        await send({ type: 'error', error: e instanceof Error ? e.message : '生成草稿失败' })
+      } finally {
+        try { await writer.close() } catch { /* ignore */ }
+      }
+    })())
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      },
+    })
+  }
 
   try {
-    const existing = await c.env.DB.prepare('SELECT id, name FROM nodes WHERE user_id = ?')
-      .bind(uid).all<{ id: string; name: string }>()
-    const rows = existing.results ?? []
-    const existingIds = new Set(rows.map((r) => r.id))
-    const existingNames = rows.map((r) => r.name)
-
-    let result: { draft: GraphDraft; reply: string }
-    if (b.draft && Array.isArray(b.draft.nodes) && b.draft.nodes.length) {
-      // 修订：先清洗客户端回传的草稿，再连同多轮历史交给模型
-      const current = sanitizeGraphDraft(b.draft)
-      result = await reviseGraphDraft(c.env, current, messages, existingNames)
-    } else {
-      // 首轮：联网搜索 + 拆解主题
-      const draft = await buildGraphDraft(c.env, lastUser.content.trim(), existingNames)
-      result = {
-        draft,
-        reply: `已生成 ${draft.nodes.length} 个知识点、${draft.edges.length} 条依赖关系。先看看预览，不满意就直接告诉我怎么改。`,
-      }
-    }
-    // 统一避开已有节点 id（含边 remap），保证确认新建时不会被 INSERT OR IGNORE 静默跳过
-    const draft = sanitizeGraphDraft(result.draft, existingIds)
-    return c.json({ draft, reply: result.reply })
+    const out = await runGraphDraft(c.env, uid, b)
+    return c.json(out)
   } catch (e) {
     console.error('graph-draft failed', e)
-    return c.json({ error: e instanceof Error ? e.message : '生成草稿失败' }, 500)
+    const msg = e instanceof Error ? e.message : '生成草稿失败'
+    const status = msg.includes('请输入') ? 400 : 500
+    return c.json({ error: msg }, status)
   }
 })
 
-// 用户确认预览后正式新建：客户端回传的 draft 一律视为不可信，重新清洗校验后再落库
+// 用户确认预览后正式新建
 app.post('/api/agent/build-graph', async (c) => {
   const uid = c.get('userId')
   if (Number(c.req.header('content-length') ?? '0') > 128 * 1024) {
     return c.json({ error: '草稿内容过大' }, 413)
   }
-  const b = await c.req.json<{ draft?: unknown }>().catch(() => null)
+  const b = await c.req.json<{ draft?: unknown; linkExisting?: boolean }>().catch(() => null)
   if (!b?.draft || typeof b.draft !== 'object') {
     return c.json({ error: '请先生成并确认预览图谱' }, 400)
   }
 
   try {
-    const existing = await c.env.DB.prepare('SELECT id FROM nodes WHERE user_id = ?')
-      .bind(uid).all<{ id: string }>()
-    const draft = sanitizeGraphDraft(b.draft, new Set((existing.results ?? []).map((r) => r.id)))
+    const domains = await loadUserDomains(c.env.DB, uid)
+    const allowed = domains.map((d) => d.id)
+    const fb = domains.find((d) => d.id === 'cs-basic')?.id ?? domains[0]?.id ?? 'cs-basic'
+    const existing = await c.env.DB.prepare('SELECT id, name FROM nodes WHERE user_id = ?')
+      .bind(uid).all<{ id: string; name: string }>()
+    const rows = existing.results ?? []
+    const meta = sanitizeGraphDraftWithMeta(b.draft, new Set(rows.map((r) => r.id)), allowed, fb)
+    const draft = meta.draft
     if (!draft.nodes.length) return c.json({ error: '草稿中没有可新建的节点' }, 400)
 
-    // 写入节点（id 已避开存量，不会与主键冲突）
     const nodeStmts = draft.nodes.map((n) =>
       c.env.DB.prepare(
         'INSERT OR IGNORE INTO nodes (id, user_id, name, domain, level, status, progress, tags) VALUES (?,?,?,?,?,?,?,?)'
       ).bind(n.id, uid, n.name, n.domain, n.level, 'todo', 0, JSON.stringify(n.tags))
     )
     await c.env.DB.batch(nodeStmts)
-    // 回查实际落库数量：并发窗口下 INSERT OR IGNORE 可能跳过节点，避免虚报「已新建」
     const placeholders = draft.nodes.map(() => '?').join(',')
     const verified = await c.env.DB.prepare(
       `SELECT COUNT(*) AS c FROM nodes WHERE user_id = ? AND id IN (${placeholders})`
     ).bind(uid, ...draft.nodes.map((n) => n.id)).first<{ c: number }>()
     const inserted = verified?.c ?? draft.nodes.length
 
-    // 写入边：两端节点必须真实存在于当前用户图谱（含已有节点）。
-    // 过滤自环、重复边与 orphan edge，避免 G6 报 Node not found
+    const bridge = b.linkExisting ? suggestLinksToExisting(draft, rows) : []
+    const allEdges = [...draft.edges, ...bridge]
+
     const [existingEdges, allNodes] = await Promise.all([
       c.env.DB.prepare('SELECT source, target FROM edges WHERE user_id = ?').bind(uid).all(),
       c.env.DB.prepare('SELECT id FROM nodes WHERE user_id = ?').bind(uid).all(),
@@ -1113,7 +1202,7 @@ app.post('/api/agent/build-graph', async (c) => {
     const validIds = new Set((allNodes.results as { id: string }[]).map((n) => n.id))
     const edgeSet = new Set((existingEdges.results as { source: string; target: string }[]).map((e) => `${e.source}|${e.target}`))
     const edgeStmts: D1PreparedStatement[] = []
-    for (const e of draft.edges) {
+    for (const e of allEdges) {
       if (!validIds.has(e.source) || !validIds.has(e.target) || e.source === e.target) continue
       const key = `${e.source}|${e.target}`
       if (edgeSet.has(key)) continue
@@ -1125,11 +1214,55 @@ app.post('/api/agent/build-graph', async (c) => {
     }
     if (edgeStmts.length) await c.env.DB.batch(edgeStmts)
 
-    return c.json({ ok: true, nodes: inserted, edges: edgeStmts.length })
+    return c.json({
+      ok: true,
+      nodes: inserted,
+      edges: edgeStmts.length,
+      linked: bridge.length,
+      conflicts: previewDraftConflicts(draft, rows, meta.remaps),
+    })
   } catch (e) {
     console.error('build-graph failed', e)
     return c.json({ error: e instanceof Error ? e.message : '构建图谱失败' }, 500)
   }
+})
+
+/** 确认草稿后按 prerequisite 拓扑生成学习路线（节点需已落库或同请求先 build） */
+app.post('/api/agent/draft-to-roadmap', async (c) => {
+  const uid = c.get('userId')
+  const b = await c.req.json<{ draft?: unknown; name?: string; description?: string }>().catch(() => null)
+  if (!b?.draft || typeof b.draft !== 'object') return c.json({ error: '缺少草稿' }, 400)
+  const domains = await loadUserDomains(c.env.DB, uid)
+  const allowed = domains.map((d) => d.id)
+  const fb = domains.find((d) => d.id === 'cs-basic')?.id ?? domains[0]?.id ?? 'cs-basic'
+  const existing = await c.env.DB.prepare('SELECT id FROM nodes WHERE user_id = ?')
+    .bind(uid).all<{ id: string }>()
+  const draft = sanitizeGraphDraft(b.draft, new Set((existing.results ?? []).map((r) => r.id)), allowed, fb)
+  if (!draft.nodes.length) return c.json({ error: '草稿为空' }, 400)
+
+  const steps = draftToRoadmapSteps(draft)
+  const owned = await c.env.DB.prepare(
+    `SELECT id FROM nodes WHERE user_id = ? AND id IN (${draft.nodes.map(() => '?').join(',')})`
+  ).bind(uid, ...draft.nodes.map((n) => n.id)).all<{ id: string }>()
+  const ownedIds = new Set((owned.results ?? []).map((r) => r.id))
+  const validSteps = steps.filter((s) => ownedIds.has(s.node_id))
+  if (!validSteps.length) {
+    return c.json({ error: '请先确认新建节点，再生成路线' }, 400)
+  }
+
+  const id = `agent-${Date.now().toString(36)}`
+  const name = (b.name?.trim() || 'AI 生成学习路线').slice(0, 80)
+  const description = (b.description?.trim() || `由图谱草稿自动生成，共 ${validSteps.length} 步`).slice(0, 200)
+  await c.env.DB.prepare(
+    'INSERT INTO roadmaps (id, user_id, name, description) VALUES (?,?,?,?)'
+  ).bind(id, uid, name, description).run()
+  const stepStmts = validSteps.map((s) =>
+    c.env.DB.prepare(
+      'INSERT INTO roadmap_steps (roadmap_id, user_id, node_id, seq) VALUES (?,?,?,?)'
+    ).bind(id, uid, s.node_id, s.seq)
+  )
+  if (stepStmts.length) await c.env.DB.batch(stepStmts)
+  return c.json({ ok: true, id, name, steps: validSteps.length })
 })
 
 // ============ 知识库教材生成 ============

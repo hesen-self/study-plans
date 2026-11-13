@@ -4,6 +4,7 @@ import { api, Checkin, DOMAIN_COLOR, DOMAIN_LABEL, Goals, HeatmapCell, Node, Sum
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { ProgressBar } from '@/components/ui/progress-bar'
 import { cnMonth, cnShift, cnToday, monthRange, weekRange } from '@/lib/date'
 import { downloadText, toCsvCell } from '@/lib/utils'
 
@@ -42,16 +43,12 @@ function renderHeatmap(dom: HTMLDivElement, data: HeatmapCell[]) {
 function GoalBar({ label, actual, target }: { label: string; actual: number; target: number }) {
   return (
     <div className="min-w-[180px] flex-1">
-      <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-        <span>{label}</span>
-        <span>{actual} / {target || '未设置'} 分钟</span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
-        <div
-          className="h-full bg-primary"
-          style={{ width: `${target > 0 ? Math.min(100, Math.round(actual / target * 100)) : 0}%` }}
-        />
-      </div>
+      <ProgressBar
+        value={target > 0 ? Math.min(100, Math.round(actual / target * 100)) : 0}
+        label={label}
+        hint={`${actual} / ${target || '未设置'} 分钟`}
+        ariaLabel={`${label}学习目标完成度`}
+      />
     </div>
   )
 }

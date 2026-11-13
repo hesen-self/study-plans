@@ -3,6 +3,20 @@
 
 export type WebSearchItem = { url: string; title: string; description?: string }
 
+export type DomainInfo = { id: string; name: string }
+
+/** 领域兜底清单（与 migrations/0009 初始 8 类一致；运行时优先用用户 domains） */
+export const DEFAULT_DOMAIN_LIST: DomainInfo[] = [
+  { id: 'ai-ml', name: 'AI / 机器学习' },
+  { id: 'backend', name: '后端开发' },
+  { id: 'frontend', name: '前端开发' },
+  { id: 'data', name: '数据与数据库' },
+  { id: 'devops', name: '工程与运维' },
+  { id: 'cs-basic', name: '计算机基础' },
+  { id: 'security', name: '安全' },
+  { id: 'product', name: '产品与软技能' },
+]
+
 // 对话构建图谱时 LLM 返回的结构
 export type GraphDraft = {
   nodes: { id: string; name: string; domain: string; level: number; tags: string[] }[]
@@ -12,32 +26,38 @@ export type GraphDraft = {
 // 多轮对话消息：会话历史由前端持有，后端保持无状态
 export type ChatTurn = { role: 'user' | 'assistant'; content: string }
 // 一轮对话的产物：修订后的完整草稿 + 给用户的自然语言说明
-export type GraphDraftResult = { draft: GraphDraft; reply: string }
+export type GraphDraftResult = {
+  draft: GraphDraft
+  reply: string
+  sources?: WebSearchItem[]
+  searchConfigured?: boolean
+}
+
+/** 局部修订操作（优先于整图重写） */
+export type DraftOp =
+  | { op: 'add_node'; node: GraphDraft['nodes'][number] }
+  | { op: 'remove_node'; id: string }
+  | { op: 'update_node'; id: string; patch: Partial<GraphDraft['nodes'][number]> }
+  | { op: 'add_edge'; edge: GraphDraft['edges'][number] }
+  | { op: 'remove_edge'; source: string; target: string }
+
+export type SanitizeMeta = {
+  draft: GraphDraft
+  remaps: { from: string; to: string }[]
+}
 
 const MAX_DRAFT_NODES = 30
 const MAX_DRAFT_EDGES = 100
+const DRAFT_CACHE_TTL = 600 // 10 分钟
 
-// 领域清单（与 domains 表保持一致；此处为兜底默认，构建图谱时优先读 DB）
-const DOMAINS = ['ai-ml', 'backend', 'frontend', 'data', 'devops', 'cs-basic', 'security', 'product'] as const
-
-// 领域中文名映射（供提示词与分类兜底）
-const DOMAIN_NAMES: Record<string, string> = {
-  'ai-ml': 'AI / 机器学习',
-  backend: '后端开发',
-  frontend: '前端开发',
-  data: '数据与数据库',
-  devops: '工程与运维',
-  'cs-basic': '计算机基础',
-  security: '安全',
-  product: '产品与软技能',
-}
-
-// 用于图谱构建/教材生成的主模型（Workers AI 开源模型）
+// 主模型：建图 / 教材；快模型：领域分类等短任务
 export const CHAT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+export const FAST_MODEL = '@cf/meta/llama-3.1-8b-instruct'
 
 export type EnvWithSearch = {
   AI: Ai
   TAVILY_API_KEY?: string
+  STATS_KV?: KVNamespace
 }
 
 // Tavily Search API 返回结果项
@@ -47,6 +67,27 @@ type TavilyResult = {
   content?: string
   score?: number
   raw_content?: string | null
+}
+
+export function isSearchConfigured(env: EnvWithSearch): boolean {
+  return !!env.TAVILY_API_KEY?.trim()
+}
+
+/** 非 product 领域视为技术类（需 demo 代码）；自定义领域默认也要代码 */
+export function isTechDomain(domain: string): boolean {
+  return domain !== 'product'
+}
+
+function domainIds(domains: DomainInfo[]): string[] {
+  return domains.map((d) => d.id)
+}
+
+function fallbackDomainId(domains: DomainInfo[]): string {
+  return domains.find((d) => d.id === 'cs-basic')?.id ?? domains[0]?.id ?? 'cs-basic'
+}
+
+function formatDomainPrompt(domains: DomainInfo[]): string {
+  return domains.map((d) => `   - ${d.id}（${d.name}）`).join('\n')
 }
 
 /**
@@ -93,18 +134,41 @@ export async function webSearch(env: EnvWithSearch, query: string, limit = 5): P
   }
 }
 
+/** 主题拆 2~3 个子查询并去重合并 */
+export async function webSearchTopic(env: EnvWithSearch, topic: string): Promise<WebSearchItem[]> {
+  if (!isSearchConfigured(env)) return []
+  const t = topic.trim().slice(0, 200)
+  const queries = [
+    `${t} 学习路线 入门`,
+    `${t} 技术栈 主流框架`,
+    `${t} 常见问题 踩坑`,
+  ]
+  const batches = await Promise.all(queries.map((q) => webSearch(env, q, 3)))
+  const seen = new Set<string>()
+  const out: WebSearchItem[] = []
+  for (const hit of batches.flat()) {
+    const key = hit.url.trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(hit)
+    if (out.length >= 8) break
+  }
+  return out
+}
+
 // 调用聊天模型，返回文本
 export async function chat(
   env: EnvWithSearch,
   messages: { role: string; content: string }[],
-  maxTokens = 2000
+  maxTokens = 2000,
+  model: string = CHAT_MODEL
 ): Promise<string> {
-  const res = await env.AI.run(CHAT_MODEL, {
+  // Workers AI 模型 id 随账号可用列表变化，此处按字符串传入
+  const res = await env.AI.run(model as '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
     messages,
     max_tokens: maxTokens,
     temperature: 0.2,
   }) as unknown
-  // 兼容不同返回结构：对象 { response } 或直接字符串
   if (typeof res === 'string') return res
   if (res && typeof res === 'object' && typeof (res as { response?: unknown }).response === 'string') {
     return (res as { response: string }).response
@@ -114,16 +178,15 @@ export async function chat(
 
 /**
  * 调用聊天模型，返回流式纯文本（ReadableStream<Uint8Array>）。
- * Workers AI 的 stream: true 返回的是 SSE 字节流（data: {"response":"..."}），
- * 这里解析并转换为纯文本增量输出，供上层直接累积。
  */
 export async function chatStream(
   env: EnvWithSearch,
   messages: { role: string; content: string }[],
-  maxTokens = 2000
+  maxTokens = 2000,
+  model: string = CHAT_MODEL
 ): Promise<ReadableStream<Uint8Array> | null> {
   try {
-    const res = (await env.AI.run(CHAT_MODEL, {
+    const res = (await env.AI.run(model as '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
       messages,
       max_tokens: maxTokens,
       temperature: 0.2,
@@ -141,7 +204,6 @@ export async function chatStream(
     const enc = new TextEncoder()
     const dec = new TextDecoder()
     let buffer = ''
-    // 解析 SSE 增量，输出纯文本（跨 chunk 维护残行 buffer）
     return raw.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) {
@@ -171,8 +233,13 @@ export async function chatStream(
   }
 }
 
+/** SSE 行：data: {...}\n\n */
+export function sseData(obj: unknown): string {
+  return `data: ${JSON.stringify(obj)}\n\n`
+}
+
 // 从 LLM 文本中稳健地提取 JSON（去掉 ```json 围栏等）
-function extractJson(text: string): unknown | null {
+export function extractJson(text: string): unknown | null {
   if (typeof text !== 'string') return null
   const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim()
   const start = cleaned.indexOf('{')
@@ -182,7 +249,6 @@ function extractJson(text: string): unknown | null {
   try {
     return JSON.parse(candidate)
   } catch {
-    // 尝试修复常见问题：尾逗号、未闭合引号等（简单兜底）
     try {
       const fixed = candidate
         .replace(/,\s*}/g, '}')
@@ -194,7 +260,6 @@ function extractJson(text: string): unknown | null {
   }
 }
 
-// 把 LLM 生成的节点 id 规范化（去非法字符，保证唯一、语义化）
 function slugify(s: string): string {
   return s
     .toLowerCase()
@@ -203,18 +268,38 @@ function slugify(s: string): string {
     .slice(0, 80)
 }
 
+function normalizeName(s: string): string {
+  return s.toLowerCase().replace(/[\s\-_/·.]+/g, '')
+}
+
 /**
- * 把任意来源（LLM 输出或客户端回传）的草稿规范化为可安全落库的结构。
- * 客户端回传的 draft 一律视为不可信：限制规模、枚举白名单、过滤自环与 orphan edge；
- * 与已有节点 id 冲突时自动重命名并同步 remap 边的端点，避免 INSERT OR IGNORE 静默丢节点。
+ * 把任意来源的草稿规范化为可安全落库的结构。
+ * allowedDomains 来自当前用户领域清单，与 prompt 白名单同源。
  */
-export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new Set()): GraphDraft {
+export function sanitizeGraphDraft(
+  raw: unknown,
+  existingIds: Set<string> = new Set(),
+  allowedDomains: string[] = domainIds(DEFAULT_DOMAIN_LIST),
+  fallbackDomain: string = 'cs-basic'
+): GraphDraft {
+  return sanitizeGraphDraftWithMeta(raw, existingIds, allowedDomains, fallbackDomain).draft
+}
+
+export function sanitizeGraphDraftWithMeta(
+  raw: unknown,
+  existingIds: Set<string> = new Set(),
+  allowedDomains: string[] = domainIds(DEFAULT_DOMAIN_LIST),
+  fallbackDomain: string = 'cs-basic'
+): SanitizeMeta {
+  const allowed = new Set(allowedDomains.length ? allowedDomains : domainIds(DEFAULT_DOMAIN_LIST))
+  const fb = allowed.has(fallbackDomain) ? fallbackDomain : [...allowed][0] ?? 'cs-basic'
   const input = (raw ?? {}) as { nodes?: unknown; edges?: unknown }
   const rawNodes = Array.isArray(input.nodes) ? input.nodes.slice(0, MAX_DRAFT_NODES) : []
   const rawEdges = Array.isArray(input.edges) ? input.edges.slice(0, MAX_DRAFT_EDGES) : []
 
   const used = new Set(existingIds)
   const idMap = new Map<string, string>()
+  const remaps: { from: string; to: string }[] = []
   const seenOriginal = new Set<string>()
   const nodes: GraphDraft['nodes'] = []
 
@@ -223,7 +308,6 @@ export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new 
     const name = String(n.name ?? '').trim().slice(0, 60)
     if (!name) return
     const originalId = String(n.id ?? '').trim()
-    // 模型偶发重复 id 时，第二个节点改用名称生成独立 id，避免产生无法被边引用的孤岛
     const duplicated = !!originalId && seenOriginal.has(originalId)
     let base = slugify((duplicated ? '' : originalId) || name)
     if (!base) base = `node-${i + 1}`
@@ -232,7 +316,8 @@ export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new 
     let suffix = 2
     while (used.has(id)) id = `${base}-${suffix++}`
     used.add(id)
-    // 边可能引用 LLM 原始 id、规范化后的 id 或上一轮清洗后的最终 id，三者都建立映射
+    if (originalId && originalId !== id) remaps.push({ from: originalId, to: id })
+    else if (!originalId && base !== id) remaps.push({ from: base, to: id })
     for (const key of [originalId, base, id]) {
       if (key && !idMap.has(key)) idMap.set(key, id)
     }
@@ -241,7 +326,7 @@ export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new 
     nodes.push({
       id,
       name,
-      domain: DOMAINS.includes(domain as (typeof DOMAINS)[number]) ? domain : 'cs-basic',
+      domain: allowed.has(domain) ? domain : fb,
       level: [1, 2, 3].includes(level) ? level : 1,
       tags: Array.isArray(n.tags)
         ? n.tags.map((t) => String(t).trim().slice(0, 40)).filter(Boolean).slice(0, 8)
@@ -250,12 +335,10 @@ export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new 
   })
 
   const newIds = new Set(nodes.map((n) => n.id))
-  // 端点只允许引用本次草稿节点，与前端预览图口径完全一致：
-  // 不引用已有节点 id，避免「预览不可见但落库生效」的幽灵连线。
-  const remap = (raw: string): string => {
-    const mapped = idMap.get(raw)
+  const remap = (rawId: string): string => {
+    const mapped = idMap.get(rawId)
     if (mapped) return mapped
-    if (newIds.has(raw)) return raw
+    if (newIds.has(rawId)) return rawId
     return ''
   }
   const seen = new Set<string>()
@@ -275,64 +358,275 @@ export function sanitizeGraphDraft(raw: unknown, existingIds: Set<string> = new 
       type: (['prerequisite', 'related', 'extend'].includes(t) ? t : 'related') as GraphDraft['edges'][number]['type'],
     })
   }
-  return { nodes, edges }
+  return { draft: { nodes, edges }, remaps }
+}
+
+/** 将局部 ops 应用到草稿后，再 sanitize */
+export function applyDraftOps(
+  draft: GraphDraft,
+  ops: DraftOp[],
+  existingIds: Set<string> = new Set(),
+  allowedDomains: string[] = domainIds(DEFAULT_DOMAIN_LIST),
+  fallbackDomain = 'cs-basic'
+): GraphDraft {
+  let nodes = [...draft.nodes]
+  let edges = [...draft.edges]
+  for (const op of ops.slice(0, 40)) {
+    if (!op || typeof op !== 'object') continue
+    if (op.op === 'add_node' && op.node) {
+      nodes.push(op.node as GraphDraft['nodes'][number])
+    } else if (op.op === 'remove_node' && op.id) {
+      nodes = nodes.filter((n) => n.id !== op.id)
+      edges = edges.filter((e) => e.source !== op.id && e.target !== op.id)
+    } else if (op.op === 'update_node' && op.id && op.patch) {
+      nodes = nodes.map((n) => (n.id === op.id ? { ...n, ...op.patch, id: n.id } : n))
+    } else if (op.op === 'add_edge' && op.edge) {
+      edges.push(op.edge as GraphDraft['edges'][number])
+    } else if (op.op === 'remove_edge' && op.source && op.target) {
+      edges = edges.filter((e) => !(e.source === op.source && e.target === op.target))
+    }
+  }
+  return sanitizeGraphDraft({ nodes, edges }, existingIds, allowedDomains, fallbackDomain)
+}
+
+/** 名称相近的已有节点 → related 挂接边建议 */
+export function suggestLinksToExisting(
+  draft: GraphDraft,
+  existing: { id: string; name: string }[]
+): GraphDraft['edges'] {
+  const links: GraphDraft['edges'] = []
+  const seen = new Set<string>()
+  for (const n of draft.nodes) {
+    const nn = normalizeName(n.name)
+    if (!nn) continue
+    for (const ex of existing) {
+      const en = normalizeName(ex.name)
+      if (!en) continue
+      const similar = nn === en || nn.includes(en) || en.includes(nn)
+      if (!similar) continue
+      const key = `${ex.id}|${n.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      links.push({ source: ex.id, target: n.id, type: 'related' })
+      break
+    }
+  }
+  return links.slice(0, 20)
+}
+
+/** 确认前冲突预览：重命名、名称相似 */
+export function previewDraftConflicts(
+  draft: GraphDraft,
+  existing: { id: string; name: string }[],
+  remaps: { from: string; to: string }[] = []
+): {
+  willCreate: { id: string; name: string }[]
+  remapped: { from: string; to: string }[]
+  nameSimilar: { draftId: string; draftName: string; existingId: string; existingName: string }[]
+} {
+  const existingIds = new Set(existing.map((e) => e.id))
+  const nameSimilar: {
+    draftId: string
+    draftName: string
+    existingId: string
+    existingName: string
+  }[] = []
+  for (const n of draft.nodes) {
+    const nn = normalizeName(n.name)
+    for (const ex of existing) {
+      const en = normalizeName(ex.name)
+      if (!nn || !en) continue
+      if (nn === en || (nn.length > 2 && (nn.includes(en) || en.includes(nn)))) {
+        nameSimilar.push({
+          draftId: n.id,
+          draftName: n.name,
+          existingId: ex.id,
+          existingName: ex.name,
+        })
+        break
+      }
+    }
+  }
+  return {
+    willCreate: draft.nodes.filter((n) => !existingIds.has(n.id)).map((n) => ({ id: n.id, name: n.name })),
+    remapped: remaps.filter((r) => r.from !== r.to),
+    nameSimilar,
+  }
+}
+
+/** 按 prerequisite 拓扑序生成路线步骤 */
+export function draftToRoadmapSteps(draft: GraphDraft): { node_id: string; seq: number }[] {
+  const ids = draft.nodes.map((n) => n.id)
+  const idSet = new Set(ids)
+  const adj = new Map<string, string[]>()
+  const indeg = new Map<string, number>()
+  for (const id of ids) {
+    adj.set(id, [])
+    indeg.set(id, 0)
+  }
+  for (const e of draft.edges) {
+    if (e.type !== 'prerequisite') continue
+    if (!idSet.has(e.source) || !idSet.has(e.target)) continue
+    adj.get(e.source)!.push(e.target)
+    indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1)
+  }
+  const queue = ids.filter((id) => (indeg.get(id) ?? 0) === 0)
+  const order: string[] = []
+  while (queue.length) {
+    const cur = queue.shift()!
+    order.push(cur)
+    for (const next of adj.get(cur) ?? []) {
+      indeg.set(next, (indeg.get(next) ?? 1) - 1)
+      if (indeg.get(next) === 0) queue.push(next)
+    }
+  }
+  const ordered = new Set(order)
+  for (const id of ids) if (!ordered.has(id)) order.push(id)
+  return order.map((node_id, i) => ({ node_id, seq: i + 1 }))
+}
+
+function draftCacheKey(uid: string, topic: string): string {
+  const t = topic.trim().toLowerCase().slice(0, 120)
+  return `agent:draft:${uid}:${t}`
+}
+
+async function chatJsonWithRetry(
+  env: EnvWithSearch,
+  messages: { role: string; content: string }[],
+  maxTokens: number,
+  model: string = CHAT_MODEL
+): Promise<unknown | null> {
+  const raw = await chat(env, messages, maxTokens, model)
+  const parsed = extractJson(raw)
+  if (parsed) return parsed
+  const retryMsgs = [
+    ...messages,
+    { role: 'assistant', content: raw.slice(0, 2000) },
+    {
+      role: 'user',
+      content: '上一次输出不是合法 JSON。请只输出严格合法的 JSON 对象，不要 markdown 围栏，不要解释。',
+    },
+  ]
+  const retryRaw = await chat(env, retryMsgs, maxTokens, model)
+  return extractJson(retryRaw)
 }
 
 /**
  * 根据一句话主题，联网搜索并生成知识图谱草稿（不落库）。
- * existingNames 用于提示模型避开用户图谱里已有的知识点。
  */
 export async function buildGraphDraft(
   env: EnvWithSearch,
   topic: string,
-  existingNames: string[] = []
-): Promise<GraphDraft> {
-  const searchHits = await webSearch(env, topic, 5)
+  existingNames: string[] = [],
+  domains: DomainInfo[] = DEFAULT_DOMAIN_LIST,
+  opts: {
+    uid?: string
+    skipCache?: boolean
+    onPhase?: (phase: 'searching' | 'generating') => void
+  } = {}
+): Promise<GraphDraftResult> {
+  const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
+  const allowed = domainIds(domainList)
+  const fb = fallbackDomainId(domainList)
+  const configured = isSearchConfigured(env)
+
+  if (opts.uid && env.STATS_KV && !opts.skipCache) {
+    try {
+      const cached = await env.STATS_KV.get(draftCacheKey(opts.uid, topic), 'json') as GraphDraftResult | null
+      if (cached?.draft?.nodes?.length) {
+        return {
+          ...cached,
+          draft: sanitizeGraphDraft(cached.draft, new Set(), allowed, fb),
+          searchConfigured: configured,
+        }
+      }
+    } catch {
+      // 缓存失败不影响主流程
+    }
+  }
+
+  opts.onPhase?.('searching')
+  const searchHits = await webSearchTopic(env, topic)
+  opts.onPhase?.('generating')
   const searchText = searchHits
-    .slice(0, 5)
-    .map((it, i) => `${i + 1}. ${it.title}\n   ${it.description ?? ''}`)
+    .slice(0, 8)
+    .map((it, i) => `${i + 1}. ${it.title}\n   ${it.description ?? ''}\n   ${it.url}`)
     .join('\n')
 
   const existingHint = existingNames.length
     ? `\n用户图谱中已有的知识点（请避免重复；若确需深化，请使用更具体的名称）：\n${existingNames.slice(0, 80).map((n) => `- ${n}`).join('\n')}\n`
     : ''
 
-  const prompt = `你是一名学习路线规划专家。请根据主题「${topic}」构建一份待用户确认的知识图谱草稿。
+  const offlineHint = configured
+    ? ''
+    : '\n注意：当前未配置联网搜索，请基于通用知识规划，并在内容上偏保守。\n'
 
+  const prompt = `你是一名学习路线规划专家。请根据主题「${topic}」构建一份待用户确认的知识图谱草稿。
+${offlineHint}
 ${searchText ? `以下是联网搜索到的相关背景信息，供你参考：\n${searchText}\n` : ''}
 ${existingHint}
 要求：
 1. 拆解出 6~12 个核心知识点作为节点，覆盖从入门到进阶的完整学习路径。
-2. 每个节点包含：id（英文或拼音 slug）、name（中文名）、domain（领域，从下面清单选最匹配的一个）、level（1入门/2进阶/3高级）、tags（标签数组，用于二级细分，可含具体技术如 java、llm、spring）。
+2. 每个节点包含：id（英文或拼音 slug）、name（中文名）、domain（领域，从下面清单选最匹配的一个）、level（1入门/2进阶/3高级）、tags（标签数组）。
 3. 领域清单（只能选其一）：
-${Object.entries(DOMAIN_NAMES).map(([k, v]) => `   - ${k}（${v}）`).join('\n')}
-4. 节点之间用边连接，表示学习依赖关系：prerequisite（前置）、related（相关）、extend（扩展）。
-5. 边要有明确的前置依赖链，形成合理的学习顺序；边的端点必须是本次 nodes 里的 id。
-6. 注意：领域是学科粗分类，交叉方向用 tags 表达（如「Java 做 AI」应归 backend 或 ai-ml，并用 tags 标注 java + llm，不要发明新领域）。
+${formatDomainPrompt(domainList)}
+4. 节点之间用边连接：prerequisite（前置）、related（相关）、extend（扩展）。
+5. 必须至少有一条完整的 prerequisite 依赖链（覆盖半数以上节点），不要全是 related。
+6. 边的端点必须是本次 nodes 里的 id。
+7. 领域是学科粗分类，交叉方向用 tags 表达，不要发明新领域。
 
 只输出 JSON，不要任何解释，格式如下：
 {"nodes":[{"id":"...","name":"...","domain":"...","level":1,"tags":["..."]}],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
 
-  const raw = await chat(env, [{ role: 'user', content: prompt }], 4000)
-  const draft = sanitizeGraphDraft(extractJson(raw))
+  const parsed = await chatJsonWithRetry(env, [{ role: 'user', content: prompt }], 4000, CHAT_MODEL)
+  const draft = sanitizeGraphDraft(parsed, new Set(), allowed, fb)
   if (!draft.nodes.length) throw new Error('模型未能生成有效的图谱结构')
-  return draft
+
+  const result: GraphDraftResult = {
+    draft,
+    reply: `已生成 ${draft.nodes.length} 个知识点、${draft.edges.length} 条依赖关系。先看看预览，不满意就直接告诉我怎么改。`,
+    sources: searchHits,
+    searchConfigured: configured,
+  }
+
+  if (opts.uid && env.STATS_KV) {
+    try {
+      await env.STATS_KV.put(draftCacheKey(opts.uid, topic), JSON.stringify(result), {
+        expirationTtl: DRAFT_CACHE_TTL,
+      })
+    } catch {
+      // ignore
+    }
+  }
+  return result
+}
+
+function summarizeIntent(messages: ChatTurn[]): string {
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const prev = messages
+    .filter((m) => m.role === 'user')
+    .slice(-3, -1)
+    .map((m) => m.content.slice(0, 80))
+  return [
+    prev.length ? `此前用户诉求摘要：${prev.join('；')}` : '',
+    `最新意见：${lastUser.slice(0, 1000)}`,
+  ].filter(Boolean).join('\n')
 }
 
 /**
- * 多轮对话修订：基于当前草稿 + 完整对话历史，按用户最新意见产出「完整的新草稿」。
- * 不做联网搜索（修订阶段依赖对话上下文即可），失败时上层保留原草稿。
+ * 多轮对话修订：优先产出 ops 局部合并；失败则回退整图重写。
  */
 export async function reviseGraphDraft(
   env: EnvWithSearch,
   draft: GraphDraft,
   messages: ChatTurn[],
-  existingNames: string[] = []
+  existingNames: string[] = [],
+  domains: DomainInfo[] = DEFAULT_DOMAIN_LIST
 ): Promise<GraphDraftResult> {
-  const history = messages
-    .slice(-12)
-    .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.content.slice(0, 1200)}`)
-    .join('\n')
+  const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
+  const allowed = domainIds(domainList)
+  const fb = fallbackDomainId(domainList)
+  const intent = summarizeIntent(messages)
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
 
   const prompt = `你是学习路线规划专家，正在与用户共同敲定一份知识图谱草稿。
@@ -343,33 +637,75 @@ ${JSON.stringify(draft)}
 【用户图谱已有知识点（避免重复）】
 ${existingNames.length ? existingNames.slice(0, 80).join('、') : '（无）'}
 
-【对话记录】
-${history}
+【变更意图】
+${intent}
 
-请根据用户最新意见「${lastUser.slice(0, 1000)}」修订草稿。要求：
-1. 输出「完整的新草稿」，不是增量 diff；保留用户未提及的合理部分，只按意见增删改节点或连线。
-2. 节点 6~20 个，字段为 id / name / domain / level / tags；domain 只能是 ${DOMAINS.join(' / ')} 之一。
-3. 边表示学习依赖（prerequisite / related / extend），端点必须是本次 nodes 里的 id，不要引用已有节点 id。
-4. reply 用一句中文简述本次改动，不要 markdown、不要复述 JSON。
-5. 只输出 JSON，格式：{"reply":"...","nodes":[...],"edges":[...]}`
+请按用户最新意见修订。优先输出局部操作 ops（add_node / remove_node / update_node / add_edge / remove_edge）；
+若改动过大也可直接给完整 nodes + edges。
+要求：
+1. domain 只能是：${allowed.join(' / ')}
+2. 边类型：prerequisite / related / extend；端点必须是草稿节点 id
+3. reply 用一句中文简述本次改动
+4. 只输出 JSON，格式之一：
+{"reply":"...","ops":[{"op":"add_node","node":{...}}]}
+或
+{"reply":"...","nodes":[...],"edges":[...]}`
 
-  const raw = await chat(env, [
+  const parsed = await chatJsonWithRetry(env, [
     { role: 'system', content: '你是学习路线规划专家，只输出严格合法的 JSON，不要任何解释文字。' },
     { role: 'user', content: prompt },
-  ], 4000)
-  const parsed = extractJson(raw) as { reply?: unknown; nodes?: unknown; edges?: unknown } | null
+  ], 4000, CHAT_MODEL) as {
+    reply?: unknown
+    ops?: unknown
+    nodes?: unknown
+    edges?: unknown
+  } | null
+
   if (!parsed) throw new Error('模型未能生成有效的修订草稿，请换一种说法再试')
 
-  const next = sanitizeGraphDraft({ nodes: parsed.nodes, edges: parsed.edges })
+  let next: GraphDraft
+  if (Array.isArray(parsed.ops) && parsed.ops.length) {
+    next = applyDraftOps(draft, parsed.ops as DraftOp[], new Set(), allowed, fb)
+  } else if (parsed.nodes) {
+    next = sanitizeGraphDraft({ nodes: parsed.nodes, edges: parsed.edges }, new Set(), allowed, fb)
+  } else {
+    throw new Error('修订结果缺少 ops 或 nodes，请重新描述你的需求')
+  }
   if (!next.nodes.length) throw new Error('修订后的草稿为空，请重新描述你的需求')
-  const reply = String(parsed.reply ?? '').trim().slice(0, 300) || '已按你的建议更新图谱草稿'
-  return { draft: next, reply }
+  const reply = String(parsed.reply ?? '').trim().slice(0, 300)
+    || `已按「${lastUser.slice(0, 40)}」更新图谱草稿`
+  return { draft: next, reply, searchConfigured: isSearchConfigured(env) }
+}
+
+function parseLessonPayload(
+  raw: string,
+  nodeName: string
+): { title: string; content: string; code: string } | null {
+  const json = extractJson(raw) as { title?: unknown; content?: unknown; code?: unknown } | null
+  if (json && (json.content || json.title)) {
+    const content = String(json.content ?? '').trim()
+    if (!content) return null
+    return {
+      title: String(json.title ?? nodeName).trim() || nodeName,
+      content,
+      code: String(json.code ?? '').trim(),
+    }
+  }
+  // 兼容旧分隔标记格式
+  const titleMatch = raw.match(/【标题】\s*([\s\S]*?)【正文】/)
+  const contentMatch = raw.match(/【正文】\s*([\s\S]*?)【代码】/)
+  const codeMatch = raw.match(/【代码】\s*([\s\S]*)$/)
+  const content = (contentMatch?.[1] ?? '').trim()
+  if (!content) return null
+  return {
+    title: (titleMatch?.[1] ?? nodeName).trim() || nodeName,
+    content,
+    code: (codeMatch?.[1] ?? '').trim(),
+  }
 }
 
 /**
  * 根据单个节点的知识点，联网查询并总结为教材小节。
- * 技术类会附带简单 demo 关键代码。
- * @param detailed 是否「重新构建」的细致模式：更多搜索、更深内容、更长篇幅
  */
 export async function generateNodeLesson(
   env: EnvWithSearch,
@@ -382,31 +718,26 @@ export async function generateNodeLesson(
     .join('\n')
   const sourceUrls = hits.map((it) => it.url)
 
-  const isTech = ['java-ai', 'frontend', 'cs-basic'].includes(node.domain)
+  const isTech = isTechDomain(node.domain)
   const prompt = buildLessonPrompt(node, detailed, isTech, searchText)
 
-  const raw = await chat(env, [{ role: 'user', content: prompt }], detailed ? 5000 : 3000)
-
-  // 解析三个分隔标记
-  const titleMatch = raw.match(/【标题】\s*([\s\S]*?)【正文】/)
-  const contentMatch = raw.match(/【正文】\s*([\s\S]*?)【代码】/)
-  const codeMatch = raw.match(/【代码】\s*([\s\S]*)$/)
-
-  const title = (titleMatch?.[1] ?? node.name).trim()
-  const content = (contentMatch?.[1] ?? '').trim()
-  const code = (codeMatch?.[1] ?? '').trim()
-
-  if (!content) {
+  const raw = await chat(env, [{ role: 'user', content: prompt }], detailed ? 5000 : 3000, CHAT_MODEL)
+  const first = parseLessonPayload(raw, node.name)
+  let parsed = first
+  if (!parsed) {
+    const retry = await chat(env, [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: raw.slice(0, 1500) },
+      { role: 'user', content: '请改为只输出 JSON：{"title":"...","content":"markdown","code":"..."}' },
+    ], detailed ? 5000 : 3000, CHAT_MODEL)
+    parsed = parseLessonPayload(retry, node.name)
+  }
+  if (!parsed) {
     console.error('generateNodeLesson parse failed, raw:', JSON.stringify(raw).slice(0, 600))
     throw new Error('教材生成失败')
   }
 
-  return {
-    title: title || node.name,
-    content,
-    code,
-    source_urls: sourceUrls,
-  }
+  return { ...parsed, source_urls: sourceUrls }
 }
 
 function buildLessonPrompt(
@@ -415,34 +746,23 @@ function buildLessonPrompt(
   isTech: boolean,
   searchText: string
 ): string {
-  const prompt = `你是资深技术讲师，请针对知识点「${node.name}」（领域：${node.domain}，难度：${node.level === 1 ? '入门' : node.level === 2 ? '进阶' : '高级'}）编写一份${detailed ? '详尽深入的' : ''}教材小节。
+  return `你是资深技术讲师，请针对知识点「${node.name}」（领域：${node.domain}，难度：${node.level === 1 ? '入门' : node.level === 2 ? '进阶' : '高级'}）编写一份${detailed ? '详尽深入的' : ''}教材小节。
 
 ${searchText ? `联网搜索到的参考资料：\n${searchText}\n` : ''}
 
 要求：
 1. 用中文，通俗易懂，结构清晰（可用标题、列表）。
 2. 正文内容：核心概念、原理、要点、常见误区，${node.level === 1 ? '面向零基础，循序渐进' : '面向有一定基础的读者，突出重点难点'}。
-${detailed ? '3. 这是「重新构建」模式，请比常规版本更深入细致：补充背景与演进、关键原理剖析、实践建议、常见问题与排查思路、进阶延伸，尽量覆盖全面。\n' : ''}
-${detailed ? '' : '3. '}${isTech ? '这是技术类知识点，请在代码部分提供一段简单的 demo 关键代码（要能体现核心用法，附简要注释）。' : '这是非技术类知识点，代码部分留空。'}
-${detailed && isTech ? '此外，请在代码部分提供更完整的示例（可含多个关键片段，覆盖主要用法与典型场景）。' : ''}
+${detailed ? '3. 这是「重新构建」模式，请比常规版本更深入细致：补充背景与演进、关键原理剖析、实践建议、常见问题与排查思路、进阶延伸。\n' : ''}
+${detailed ? '' : '3. '}${isTech ? '这是技术类知识点，请在 code 中提供简单 demo 代码（附注释）。' : '这是非技术类知识点，code 留空字符串。'}
+${detailed && isTech ? 'code 可含多个关键片段，覆盖主要用法。' : ''}
 
-请严格按以下格式输出（三个部分之间用这三个标记分隔，标记独占一行）：
-
-【标题】
-<这里写教材标题>
-
-【正文】
-<这里写教材正文，markdown 格式>
-
-【代码】
-<${isTech ? '这里写 demo 代码，如果不需要代码则留空' : '留空'}>`
-  return prompt
+只输出 JSON（不要 markdown 围栏）：
+{"title":"教材标题","content":"正文 markdown","code":"${isTech ? 'demo 代码或空字符串' : ''}"}`
 }
 
 /**
- * 流式生成教材：返回一个 ReadableStream，逐 token 产出教材文本。
- * 前端以 SSE 方式接收并实时渲染。
- * 与 generateNodeLesson 相同的 prompt，但用 stream: true 增量输出。
+ * 流式生成教材：返回纯文本流；前端可累积后 parse，或实时展示。
  */
 export async function generateNodeLessonStream(
   env: EnvWithSearch,
@@ -455,39 +775,42 @@ export async function generateNodeLessonStream(
     .join('\n')
   const sourceUrls = hits.map((it) => it.url)
 
-  const isTech = ['java-ai', 'frontend', 'cs-basic'].includes(node.domain)
+  const isTech = isTechDomain(node.domain)
   const prompt = buildLessonPrompt(node, detailed, isTech, searchText)
 
-  const rawStream = await chatStream(env, [{ role: 'user', content: prompt }], detailed ? 5000 : 3000)
+  const rawStream = await chatStream(env, [{ role: 'user', content: prompt }], detailed ? 5000 : 3000, CHAT_MODEL)
   if (!rawStream) return null
   return { stream: rawStream, sourceUrls }
 }
 
 /**
  * 根据节点名称 + 标签，由 LLM 判断其所属领域。
- * 返回领域 id（限定在 DOMAINS 清单内），失败回退 'cs-basic'。
  */
 export async function classifyDomain(
   env: EnvWithSearch,
   name: string,
-  tags: string[]
+  tags: string[],
+  domains: DomainInfo[] = DEFAULT_DOMAIN_LIST
 ): Promise<string> {
+  const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
+  const allowed = domainIds(domainList)
+  const fb = fallbackDomainId(domainList)
   const prompt = `请判断下面这个知识点属于哪个领域。
 
 知识点名称：${name}
 标签：${tags.length ? tags.join('、') : '（无）'}
 
 领域清单（只能选其一）：
-${Object.entries(DOMAIN_NAMES).map(([k, v]) => `- ${k}：${v}`).join('\n')}
+${domainList.map((d) => `- ${d.id}：${d.name}`).join('\n')}
 
-只输出一个领域 id（如 ai-ml、backend），不要任何解释。`
+只输出一个领域 id，不要任何解释。`
 
   try {
-    const raw = await chat(env, [{ role: 'user', content: prompt }], 50)
+    const raw = await chat(env, [{ role: 'user', content: prompt }], 50, FAST_MODEL)
     const cleaned = raw.trim().toLowerCase()
-    const matched = DOMAINS.find((d) => cleaned.includes(d))
-    return matched ?? 'cs-basic'
+    const matched = allowed.find((d) => cleaned === d || cleaned.includes(d))
+    return matched ?? fb
   } catch {
-    return 'cs-basic'
+    return fb
   }
 }
