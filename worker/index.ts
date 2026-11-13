@@ -74,6 +74,32 @@ function isAllowedOrigin(env: Bindings, origin: string, requestUrl: string): boo
   return extra.includes(origin)
 }
 
+// ============ 结构化请求日志：写入 Workers Logs，可按字段检索 ============
+// 只记录方法 / 路径 / 状态 / 耗时 / 用户 id / CF-Ray，
+// 不记录 body、cookie、邮箱、验证码等敏感信息。
+app.use('/api/*', async (c, next) => {
+  const started = Date.now()
+  const path = new URL(c.req.url).pathname
+  let failed = false
+  try {
+    await next()
+  } catch (e) {
+    failed = true
+    throw e
+  } finally {
+    console.log({
+      kind: 'api_request',
+      method: c.req.method,
+      path,
+      status: c.res?.status ?? 0,
+      duration_ms: Date.now() - started,
+      user_id: c.get('userId') ?? '',
+      cf_ray: c.req.header('cf-ray') ?? '',
+      failed,
+    })
+  }
+})
+
 // ============ CORS：同源 + 白名单，OPTIONS 预检在鉴权之前短路 ============
 app.use('/api/*', async (c, next) => {
   const origin = c.req.header('origin') ?? ''

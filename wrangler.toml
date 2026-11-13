@@ -49,6 +49,24 @@ binding = "AI"
 # 跨域白名单（可选）：ALLOWED_ORIGINS=https://a.example.com,https://b.example.com
 #   同源请求与回环地址（localhost / 127.0.0.1，供本地 Vite 代理）始终允许；
 #   留空即只允许同源与回环。必须显式列举外部域名，不支持通配符 *。
+
+# ============ 可观测性：Workers Logs + 链路追踪 ============
+# 采样率 1 = 100%（个人项目流量低，便于完整排障）。
+# 注意：2026-12-01 起按 Cloudflare Observability 用量计费，
+#      流量上来后把下面两个 head_sampling_rate 调小即可（如 0.1）。
+# 查看位置：Cloudflare Dashboard → Workers & Pages → study-plans-api → Observability
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 SMTP_HOST = "smtp.163.com"
 SMTP_PORT = "465"

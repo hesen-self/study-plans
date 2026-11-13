@@ -222,11 +222,25 @@ npm run build
 npx wrangler deploy
 ```
 
-### Cloudflare Access（登录鉴权）
+### 应用层登录（鉴权）
 
-部署后通过 Cloudflare Access 保护站点，策略允许指定邮箱访问。Access 登录后自动注入用户身份，实现多用户数据隔离。
+站点使用应用层自建登录：邮箱验证码（163 SMTP）+ GitHub OAuth，会话通过 httpOnly cookie 存于 `STATS_KV`。除 `/api/auth/*` 外，未登录请求一律 401；线上勿设置 `ALLOW_ANONYMOUS`，额外跨域来源用 `ALLOWED_ORIGINS` 显式列举（不支持 `*`）。
 
-> 注意：自定义登录页模板（OTP 页面）需 Zero Trust 付费版，免费套餐使用默认登录页。
+### 可观测性（Workers Logs + 链路追踪）
+
+`wrangler.toml` 已开启平台侧可观测性，无需额外 SDK：
+
+| 配置 | 值 | 作用 |
+| --- | --- | --- |
+| `[observability.logs] enabled` | `true` | 采集 invocation logs、`console.*`、未捕获异常 |
+| `[observability.logs] invocation_logs` | `true` | 记录每次调用的 Request / Response 元数据 |
+| `[observability.traces] enabled` | `true` | 自动埋点出站 fetch、KV / R2 / Durable Object 绑定调用、RPC、handler 生命周期 |
+| `head_sampling_rate` | `1`（100%） | 日志与追踪各自独立采样，流量上升后调小即可 |
+
+- **查看**：Cloudflare Dashboard → Workers & Pages → `study-plans-api` → **Observability**（Logs / Traces）；实时日志用 `npx wrangler tail`。
+- **结构化日志**：`worker/index.ts` 首个中间件输出 `kind: api_request`（`method` / `path` / `status` / `duration_ms` / `user_id` / `cf_ray` / `failed`），可在 Workers Logs 按字段检索；不记录 body、cookie、邮箱与验证码。
+- **保留与计费**：日志与追踪均保留 7 天；2026-12-01 起纳入 Cloudflare Observability 按量计费，低流量项目用采样率控制成本。
+- **版本要求**：`traces` 需 Wrangler 4.x，本项目为 `4.161.0`（配套 `@cloudflare/workers-types` 5.x）。
 
 ---
 
