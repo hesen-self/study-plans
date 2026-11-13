@@ -1,15 +1,18 @@
 import { useState } from 'react'
-import { api } from '@/api'
+import { api, Node } from '@/api'
+import { safeHttpUrl } from '@/lib/sanitize'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 
 interface Props {
   onBuilt: () => void
+  nodes: Node[]
 }
 
 type WebHit = { url: string; title: string; description?: string }
 
-export default function AgentPanel({ onBuilt }: Props) {
+export default function AgentPanel({ onBuilt, nodes }: Props) {
   const [mode, setMode] = useState<'search' | 'build'>('build')
   const [query, setQuery] = useState('')
   const [topic, setTopic] = useState('')
@@ -17,13 +20,20 @@ export default function AgentPanel({ onBuilt }: Props) {
   const [building, setBuilding] = useState(false)
   const [searching, setSearching] = useState(false)
   const [buildMsg, setBuildMsg] = useState('')
+  // 搜索结果一键收藏为资源
+  const [collectNodeId, setCollectNodeId] = useState('')
+  const [collected, setCollected] = useState<Set<string>>(new Set())
+
+  const targetNodeId = collectNodeId || nodes[0]?.id || ''
 
   const doSearch = async () => {
     if (!query.trim()) return
     setSearching(true)
+    setBuildMsg('')
     try {
       const r = await api.webSearch(query.trim())
       setHits(r.results)
+      setCollected(new Set())
     } catch (e) {
       setBuildMsg(e instanceof Error ? e.message : '联网搜索失败')
       setHits(null)
@@ -45,6 +55,26 @@ export default function AgentPanel({ onBuilt }: Props) {
       setBuildMsg(e instanceof Error ? e.message : '构建失败')
     } finally {
       setBuilding(false)
+    }
+  }
+
+  const collect = async (hit: WebHit, url: string) => {
+    if (!targetNodeId) {
+      setBuildMsg('请先在知识图谱中创建节点，才能收藏搜索结果')
+      return
+    }
+    setBuildMsg('')
+    try {
+      await api.addResource({
+        node_id: targetNodeId,
+        title: hit.title || url,
+        url,
+        kind: 'article',
+      })
+      setCollected((prev) => new Set([...prev, hit.url]))
+      setBuildMsg(`已收藏到「${nodes.find((n) => n.id === targetNodeId)?.name ?? targetNodeId}」的资源链接`)
+    } catch (e) {
+      setBuildMsg(e instanceof Error ? e.message : '收藏失败')
     }
   }
 
@@ -90,7 +120,7 @@ export default function AgentPanel({ onBuilt }: Props) {
 
       {mode === 'search' && (
         <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">联网搜索当前信息，结果来自 Web Search API。</p>
+          <p className="text-sm text-muted-foreground">联网搜索当前信息，结果可一键收藏为知识点的资源链接。</p>
           <div className="flex gap-2">
             <Input
               placeholder="搜索关键词…"
@@ -104,23 +134,46 @@ export default function AgentPanel({ onBuilt }: Props) {
               {searching ? '搜索中…' : '搜索'}
             </Button>
           </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">收藏到</span>
+            <Select value={targetNodeId} onChange={(e) => setCollectNodeId(e.target.value)} className="w-56">
+              <option value="">选择知识点…</option>
+              {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+            </Select>
+          </div>
           {hits && (
-            <div className="max-h-72 overflow-y-auto space-y-1">
+            <div className="max-h-72 space-y-1 overflow-y-auto">
               {hits.length === 0 && <p className="text-sm text-muted-foreground">无结果</p>}
-              {hits.map((h, i) => (
-                <a
-                  key={i}
-                  href={h.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="block rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-secondary"
-                >
-                  <span className="font-medium text-primary">{h.title}</span>
-                  {h.description && <span className="block text-xs text-muted-foreground line-clamp-2">{h.description}</span>}
-                </a>
-              ))}
+              {hits.map((h, i) => {
+                const url = safeHttpUrl(h.url)
+                if (!url) return null
+                const done = collected.has(h.url)
+                return (
+                  <div key={i} className="rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-secondary">
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block"
+                    >
+                      <span className="font-medium text-primary">{h.title}</span>
+                      {h.description && <span className="block text-xs text-muted-foreground line-clamp-2">{h.description}</span>}
+                    </a>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-1"
+                      disabled={done || !targetNodeId}
+                      onClick={() => collect(h, url)}
+                    >
+                      {done ? '已收藏' : '收藏为资源'}
+                    </Button>
+                  </div>
+                )
+              })}
             </div>
           )}
+          {buildMsg && <p className="text-xs text-muted-foreground">{buildMsg}</p>}
         </div>
       )}
     </div>

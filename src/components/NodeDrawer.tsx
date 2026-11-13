@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { marked } from 'marked'
 import { api, DOMAIN_LABEL, Node, Resource, STATUS_LABEL } from '@/api'
+import { sanitizeHtml, safeHttpUrl } from '@/lib/sanitize'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,11 +25,24 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
   const [resUrl, setResUrl] = useState('')
   const [resKind, setResKind] = useState<Resource['kind']>('doc')
   const [saving, setSaving] = useState(false)
+  // 进度滑杆：本地值即时响应拖动，PATCH 防抖 300ms，避免每 5% 打一次接口
+  const [localProgress, setLocalProgress] = useState(node?.progress ?? 0)
+  const progressTimer = useRef<number | null>(null)
 
   useEffect(() => {
     api.note(nodeId).then((r) => setNote(r.content))
     api.resources(nodeId).then(setResources)
   }, [nodeId])
+
+  useEffect(() => {
+    // 外部（打卡驱动等）更新进度时同步到滑杆
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLocalProgress(node?.progress ?? 0)
+  }, [node?.progress, nodeId])
+
+  useEffect(() => () => {
+    if (progressTimer.current !== null) window.clearTimeout(progressTimer.current)
+  }, [])
 
   if (!node) return null
 
@@ -42,6 +56,14 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
     const status = progress >= 100 ? 'done' : progress > 0 ? 'learning' : 'todo'
     await api.updateNode(nodeId, { progress, status })
     onChanged()
+  }
+
+  const onProgressInput = (value: number) => {
+    setLocalProgress(value)
+    if (progressTimer.current !== null) window.clearTimeout(progressTimer.current)
+    progressTimer.current = window.setTimeout(() => {
+      void updateProgress(value).catch(() => setLocalProgress(node?.progress ?? 0))
+    }, 300)
   }
 
   const saveNote = async () => {
@@ -102,18 +124,19 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
           </div>
           <div className="mt-3 flex items-center gap-3">
             <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
-              <div className="h-full rounded-full bg-primary" style={{ width: `${node.progress}%` }} />
+              <div className="h-full rounded-full bg-primary" style={{ width: `${localProgress}%` }} />
             </div>
-            <span className="text-sm text-muted-foreground">{node.progress}%</span>
+            <span className="text-sm text-muted-foreground">{localProgress}%</span>
           </div>
           <input
             type="range"
             min={0}
             max={100}
             step={5}
-            value={node.progress}
+            value={localProgress}
             className="mt-2 w-full accent-primary"
-            onChange={(e) => updateProgress(Number(e.target.value))}
+            aria-label="学习进度"
+            onChange={(e) => onProgressInput(Number(e.target.value))}
           />
         </section>
 
@@ -138,7 +161,7 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
                 className="mt-2 min-h-[100px] rounded-lg border border-border p-3 text-sm"
                 dangerouslySetInnerHTML={{
                   __html: note
-                    ? (marked.parse(note) as string)
+                    ? sanitizeHtml(marked.parse(note) as string)
                     : '<i class="text-muted-foreground">暂无笔记</i>',
                 }}
               />
@@ -159,9 +182,9 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
               >
                 <Badge variant="secondary">{r.kind}</Badge>
                 <a
-                  href={r.url}
+                  href={safeHttpUrl(r.url) || undefined}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="flex-1 truncate text-sm text-primary hover:underline"
                 >
                   {r.title}

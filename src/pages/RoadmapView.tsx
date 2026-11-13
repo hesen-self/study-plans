@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, Node, Roadmap, RoadmapStep, STATUS_LABEL } from '@/api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -17,6 +17,12 @@ export default function RoadmapView() {
   const [rmName, setRmName] = useState('')
   const [rmDesc, setRmDesc] = useState('')
   const [rmSaving, setRmSaving] = useState(false)
+  // 拖拽排序
+  const [dragIdx, setDragIdx] = useState<number | null>(null)
+  const [overIdx, setOverIdx] = useState<number | null>(null)
+  const [error, setError] = useState('')
+  // 保存锁：避免连续拖放并发 PUT 互相覆盖
+  const savingRef = useRef(false)
 
   const loadRoadmaps = () => {
     api.roadmaps().then((rs) => {
@@ -42,8 +48,15 @@ export default function RoadmapView() {
   const currentLearning = steps.find((s) => s.status === 'learning')
 
   const save = (newSteps: RoadmapStep[]) => {
+    if (savingRef.current || !currentId) return
+    savingRef.current = true
+    setError('')
     const payload = newSteps.map((s, i) => ({ node_id: s.id, seq: i + 1 }))
-    api.saveSteps(currentId, payload).then(() => api.roadmap(currentId).then(setCurrent))
+    api.saveSteps(currentId, payload)
+      .then(() => api.roadmap(currentId))
+      .then(setCurrent)
+      .catch((e) => setError(e instanceof Error ? e.message : '保存路线失败'))
+      .finally(() => { savingRef.current = false })
   }
 
   const move = (idx: number, dir: -1 | 1) => {
@@ -56,6 +69,17 @@ export default function RoadmapView() {
 
   const remove = (idx: number) => save(steps.filter((_, i) => i !== idx))
 
+  const dropAt = (target: number) => {
+    if (dragIdx !== null && dragIdx !== target) {
+      const arr = [...steps]
+      const [moved] = arr.splice(dragIdx, 1)
+      arr.splice(target, 0, moved)
+      save(arr)
+    }
+    setDragIdx(null)
+    setOverIdx(null)
+  }
+
   const add = () => {
     if (!addNodeId || inRoadmap.has(addNodeId)) return
     const n = allNodes.find((x) => x.id === addNodeId)
@@ -65,8 +89,13 @@ export default function RoadmapView() {
   }
 
   const markDone = async (s: RoadmapStep) => {
-    await api.updateNode(s.id, { status: 'done', progress: 100 })
-    api.roadmap(currentId).then(setCurrent)
+    setError('')
+    try {
+      await api.updateNode(s.id, { status: 'done', progress: 100 })
+      setCurrent(await api.roadmap(currentId))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '更新节点状态失败')
+    }
   }
 
   const doneCount = steps.filter((s) => s.status === 'done').length
@@ -112,6 +141,7 @@ export default function RoadmapView() {
 
   return (
     <div>
+      {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Select value={currentId} onChange={(e) => setCurrentId(e.target.value)} className="w-56">
           {roadmaps.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
@@ -140,11 +170,25 @@ export default function RoadmapView() {
           ))}
         </Select>
         <Button onClick={add} disabled={!addNodeId}>加入路线</Button>
+        <span className="text-xs text-muted-foreground">步骤支持拖拽排序，也可用 ↑ ↓ 微调</span>
       </div>
 
       <div className="flex max-w-[640px] flex-col">
         {steps.map((s, i) => (
-          <div key={s.id}>
+          <div
+            key={s.id}
+            draggable
+            onDragStart={() => setDragIdx(i)}
+            onDragOver={(e) => { e.preventDefault(); setOverIdx(i) }}
+            onDragLeave={() => setOverIdx(null)}
+            onDrop={(e) => { e.preventDefault(); dropAt(i) }}
+            onDragEnd={() => { setDragIdx(null); setOverIdx(null) }}
+            className={cn(
+              'cursor-grab rounded-md transition-colors',
+              dragIdx === i && 'opacity-50',
+              overIdx === i && dragIdx !== i && 'bg-secondary'
+            )}
+          >
             {i > 0 && <div className="ml-[7px] h-6 w-0.5 bg-border" />}
             <div className="flex items-center gap-3">
               <div

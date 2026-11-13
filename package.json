@@ -13,6 +13,8 @@
     "test": "node --experimental-strip-types --test tests/avatar.test.ts",
     "db:init": "wrangler d1 execute study-plans --local --file=migrations/0001_init.sql",
     "db:seed": "wrangler d1 execute study-plans --local --file=seed/seed.sql",
+    "db:migrate": "wrangler d1 migrations apply study-plans --local",
+    "db:migrate:remote": "wrangler d1 migrations apply study-plans --remote",
     "deploy:api": "wrangler deploy",
     "deploy:web": "npm run build && wrangler pages deploy dist --project-name=study-plans"
   },

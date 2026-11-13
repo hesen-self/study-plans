@@ -43,6 +43,16 @@ export default function App() {
     checkAuth()
   }, [checkAuth])
 
+  // 任意 API 返回 401（会话过期）时统一回到登录页
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAuthStatus('guest')
+      setEmail('')
+    }
+    window.addEventListener('app:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('app:unauthorized', onUnauthorized)
+  }, [])
+
   const logout = async () => {
     try {
       await api.logout()

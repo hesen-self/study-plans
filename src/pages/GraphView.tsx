@@ -249,7 +249,7 @@ export default function GraphView() {
             <h2 className="text-lg font-medium">AI 助手</h2>
             <Button variant="ghost" size="sm" onClick={() => setShowAgent(false)}>关闭</Button>
           </div>
-          <AgentPanel onBuilt={load} />
+          <AgentPanel onBuilt={load} nodes={nodes} />
         </div>
       )}
 

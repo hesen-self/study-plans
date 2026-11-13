@@ -73,10 +73,38 @@ export interface KnowledgeDoc {
   title: string
   content: string
   code: string
-  source_urls: string
+  source_urls: string | null
   domain: string
   seq: number
+  is_edited?: number
   created_at?: string
+  updated_at?: string
+}
+
+export interface Goals {
+  daily: number
+  weekly: number
+}
+
+export interface KnowledgeJob {
+  id: string
+  user_id: string
+  status: 'running' | 'paused' | 'completed' | 'cancelled'
+  detailed: number
+  total: number
+  completed: number
+  failed: number
+  current_node: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface KnowledgeJobItem {
+  job_id: string
+  node_id: string
+  seq: number
+  status: 'pending' | 'done' | 'failed' | 'skipped'
+  error: string
 }
 
 
@@ -133,7 +161,18 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
+  if (!r.ok) {
+    let message = `${r.status} ${r.statusText}`
+    try {
+      const data = (await r.json()) as { error?: string }
+      if (data.error) message = data.error
+    } catch {
+      // 非 JSON 错误响应，保留 status
+    }
+    // 会话过期统一广播，App 监听后切回登录页
+    if (r.status === 401) window.dispatchEvent(new Event('app:unauthorized'))
+    throw new Error(message)
+  }
   return r.json() as Promise<T>
 }
 
@@ -144,6 +183,8 @@ export const api = {
     req(`/api/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteNode: (id: string) => req(`/api/nodes/${id}`, { method: 'DELETE' }),
   createEdge: (e: Partial<Edge>) => req('/api/edges', { method: 'POST', body: JSON.stringify(e) }),
+  updateEdge: (id: number, type: Edge['type']) =>
+    req(`/api/edges/${id}`, { method: 'PATCH', body: JSON.stringify({ type }) }),
   deleteEdge: (id: number) => req(`/api/edges/${id}`, { method: 'DELETE' }),
 
   // 领域管理
@@ -171,11 +212,18 @@ export const api = {
   saveSteps: (id: string, steps: { node_id: string; seq: number }[]) =>
     req(`/api/roadmaps/${id}/steps`, { method: 'PUT', body: JSON.stringify(steps) }),
 
-  checkins: (from?: string, to?: string) =>
-    req<Checkin[]>(`/api/checkins?from=${from ?? ''}&to=${to ?? ''}`),
+  checkins: (from?: string, to?: string, nodeId?: string) =>
+    req<Checkin[]>(
+      `/api/checkins?from=${from ?? ''}&to=${to ?? ''}${nodeId ? `&node_id=${encodeURIComponent(nodeId)}` : ''}`
+    ),
   addCheckin: (b: { node_id: string; date: string; minutes: number; note?: string }) =>
-    req('/api/checkins', { method: 'POST', body: JSON.stringify(b) }),
+    req<{ ok: boolean; progress: number }>('/api/checkins', { method: 'POST', body: JSON.stringify(b) }),
   deleteCheckin: (id: number) => req(`/api/checkins/${id}`, { method: 'DELETE' }),
+  goals: () => req<Goals>('/api/goals'),
+  saveGoals: (g: Partial<Goals>) =>
+    req<{ ok: boolean; daily: number; weekly: number }>('/api/goals', {
+      method: 'PUT', body: JSON.stringify(g),
+    }),
 
   heatmap: () => req<HeatmapCell[]>('/api/stats/heatmap'),
   summary: () => req<Summary>('/api/stats/summary'),
@@ -225,8 +273,28 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ node_id, seq, detailed }),
+    }).then((r) => {
+      if (r.status === 401) window.dispatchEvent(new Event('app:unauthorized'))
+      return r
     }),
   clearKnowledge: () => req<{ ok: boolean }>('/api/knowledge', { method: 'DELETE' }),
+  // 人工编辑教材（置 is_edited，批处理任务不再覆盖）
+  updateKnowledgeDoc: (node_id: string, patch: { title?: string; content?: string; code?: string }) =>
+    req<{ ok: boolean }>(`/api/knowledge/${encodeURIComponent(node_id)}`, {
+      method: 'PATCH', body: JSON.stringify(patch),
+    }),
+  // 服务端批处理任务：关页面不中断，可取消 / 断点续跑
+  startKnowledgeJob: (opts: { rebuild?: boolean; detailed?: boolean }) =>
+    req<{ ok: boolean; job: KnowledgeJob | null; reused?: boolean; error?: string }>('/api/knowledge/jobs', {
+      method: 'POST', body: JSON.stringify(opts),
+    }),
+  activeKnowledgeJob: () => req<{ job: KnowledgeJob | null }>('/api/knowledge/jobs/active'),
+  knowledgeJob: (id: string) =>
+    req<{ job: KnowledgeJob; items: KnowledgeJobItem[] }>(`/api/knowledge/jobs/${encodeURIComponent(id)}`),
+  cancelKnowledgeJob: (id: string) =>
+    req<{ ok: boolean }>(`/api/knowledge/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  resumeKnowledgeJob: (id: string) =>
+    req<{ ok: boolean; job: KnowledgeJob | null }>(`/api/knowledge/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
 
   profile: () => req<Profile>('/api/profile'),
   saveProfile: (p: Partial<Profile>) => {

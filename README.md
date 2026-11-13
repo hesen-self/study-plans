@@ -2,7 +2,7 @@
 
 一个面向个人技术提升的知识图谱管理与学习打卡系统。以「知识图谱」为核心，将待学知识点组织成可视化关系网，配套学习路线、打卡统计、笔记资源与个人资料管理，帮助你体系化地追踪技术成长。
 
-> 部署于 Cloudflare，单 Worker 同域托管 SPA + API，通过 Cloudflare Access 实现多用户登录与数据隔离。
+> 部署于 Cloudflare，单 Worker 同域托管 SPA + API，应用层自建登录（邮箱验证码 / GitHub OAuth）+ session cookie 实现多用户隔离。
 
 ---
 
@@ -54,7 +54,7 @@
    (主存储)   (笔记md)  (统计缓存)  (语义搜索)
 ```
 
-- **单 Worker**：`wrangler.toml` 通过 `[assets]` 绑定 `dist` 目录，Worker 同域托管前端与 API，便于 Access 统一保护全站（含 `/api`）。
+- **单 Worker**：`wrangler.toml` 通过 `[assets]` 绑定 `dist` 目录，Worker 同域托管前端与 API，session cookie（`HttpOnly` + `SameSite=Lax`）覆盖全站 `/api`。
 - **数据隔离**：所有业务表带独立 `user_id` 字段，主键为复合主键 `(user_id, id)`，查询/写入全链路按 `user_id` 过滤。
 
 ---
@@ -93,15 +93,17 @@ study-plans/
 ```bash
 npm install
 
-# 初始化本地 D1 并导入种子数据
-npm run db:init
+# 按序执行全部迁移（含 0010），再导入种子数据
+npm run db:migrate
 npm run db:seed
 
 # 同时启动 Worker（:8787）与前端（:5173）
 npm run dev
 ```
 
-访问 http://localhost:5173 。本地开发无 Cloudflare Access 头，默认使用 `default` 用户身份。
+访问 http://localhost:5173 ，用邮箱验证码或 GitHub OAuth 登录。
+未登录请求除 `/api/auth/*` 外一律返回 401；如需匿名调试（映射到 `default` 用户），在 `.dev.vars` 写入 `ALLOW_ANONYMOUS=true` 或用 `wrangler dev --var ALLOW_ANONYMOUS:true` 启动，**线上不要设置该变量**。
+跨域访问可在 `ALLOWED_ORIGINS` 中显式列举外部来源（不支持 `*`；同源与 `localhost` / `127.0.0.1` 回环地址默认放行，以适配 Vite 代理）。
 
 ### 常用命令
 
@@ -113,8 +115,10 @@ npm run dev
 | `npm run build` | TypeScript 编译 + Vite 构建 |
 | `npm run lint` | ESLint 检查（0 error 标准） |
 | `npm run lint:fix` | ESLint 自动修复 |
-| `npm run db:init` | 初始化本地 D1（0001 迁移） |
+| `npm run db:init` | 仅初始化 0001（遗留命令，新环境请用 `db:migrate`） |
 | `npm run db:seed` | 导入种子数据 |
+| `npm run db:migrate` | 按序应用全部本地 D1 迁移 |
+| `npm run db:migrate:remote` | 按序应用全部线上 D1 迁移 |
 
 ---
 
@@ -130,28 +134,28 @@ npm run dev
 | `roadmap_steps` | `(roadmap_id, user_id, node_id)` | 路线步骤 |
 | `checkins` | 自增 id | 打卡记录（日期、分钟数、备注） |
 | `resources` | 自增 id | 资源链接 |
-| `profile` | `user_id` | 个人资料 |
+| `profile` | `user_id` | 个人资料（已合并进 `users`） |
+| `users` | `id` | 账号（雪花 id + 邮箱 + 资料） |
+| `domains` | `(user_id, id)` | 领域清单（共享模板 + 每用户覆盖） |
+| `user_meta` | `user_id` | 图谱初始化标记 + 每日/每周学习目标 |
+| `knowledge_docs` | 自增 id | 节点教材（`is_edited` 标记人工编辑） |
+| `knowledge_jobs` / `knowledge_job_items` | `id` / `(job_id, node_id)` | 知识库批处理任务与逐节点进度 |
 
 ### 迁移顺序
 
-迁移文件必须按序执行（本地 `db:init` 仅跑 `0001`，后续需手动执行）：
+`npm run db:migrate` 会按文件名顺序自动应用 `migrations/*.sql`，无需逐条手工执行。
 
-```bash
-npx wrangler d1 execute study-plans --local --file=migrations/0002_profile.sql
-npx wrangler d1 execute study-plans --local --file=migrations/0003_multiuser.sql
-npx wrangler d1 execute study-plans --local --file=migrations/0004_multiuser_v2.sql
-```
-
-> 线上执行时将 `--local` 替换为 `--remote`。
+> **部署顺序**：`0010_hardening.sql` 新增的表/列（`user_meta`、`knowledge_jobs`、`knowledge_docs.is_edited`、`domains.user_id`）被核心接口强依赖。必须先执行 `npm run db:migrate:remote`，再 `wrangler deploy`，否则 `/api/graph`、`/api/goals`、`/api/domains` 会 500。
+> 早期用 `db:init` 手工建过的本地库没有迁移记录，建议清掉本地 `.wrangler/state` 后重新 `db:migrate`。
 
 ---
 
 ## 多用户数据隔离
 
-- **身份来源**：Cloudflare Access 保护全站，会在请求头注入 `Cf-Access-Jwt-Assertion`（JWT）。Worker 身份中间件解 JWT 的 `email` 作为 `user_id`；本地开发无该头时回退 `default`。
+- **身份来源**：应用层自建登录（邮箱验证码 / GitHub OAuth）签发 httpOnly session cookie，Worker 中间件解析出邮箱，再经 `users` 表映射为雪花 `user_id`。除认证接口外，未登录一律 401。
 - **隔离机制**：纯独立 `user_id` 字段隔离（不使用 id 前缀拼接）。`nodes` / `roadmaps` 采用复合主键 `(user_id, id)`，不同用户可创建同名节点/路线而互不冲突。
 - **存储介质隔离**：R2 笔记 key 为 `notes/{user_id}/{nodeId}.md`；KV 缓存 key 带 `:{user_id}` 后缀；Vectorize 向量通过 `metadata.userId` 过滤。
-- **新用户初始化**：首次访问图谱时，若自身无数据，自动复制 `default` 用户的模板图谱（节点 + 边 + 路线）。
+- **新用户初始化**：首次访问图谱且 `user_meta.graph_seeded = 0` 时复制 `default` 模板图谱（节点 + 边 + 路线，自动过滤 orphan edge）并置标记；用户主动删空图谱后不会回填。
 
 ---
 
@@ -163,12 +167,14 @@ npx wrangler d1 execute study-plans --local --file=migrations/0004_multiuser_v2.
 | POST | `/api/nodes` | 新建节点 |
 | PATCH | `/api/nodes/:id` | 更新节点 |
 | DELETE | `/api/nodes/:id` | 删除节点（级联清理） |
-| POST | `/api/edges` | 新建连线 |
+| POST | `/api/edges` | 新建连线（校验端点存在/归属/自环/重复） |
+| PATCH | `/api/edges/:id` | 修改连线类型 |
 | DELETE | `/api/edges/:id` | 删除连线 |
 | GET | `/api/roadmaps` | 路线列表 |
 | GET | `/api/roadmaps/:id` | 路线详情（含步骤） |
 | PUT | `/api/roadmaps/:id/steps` | 替换路线步骤 |
-| GET/POST | `/api/checkins` | 打卡查询 / 新增 |
+| GET/POST | `/api/checkins` | 打卡查询 / 新增（自动推进节点进度） |
+| GET/PUT | `/api/goals` | 每日 / 每周学习目标 |
 | DELETE | `/api/checkins/:id` | 删除打卡 |
 | GET/PUT | `/api/notes/:nodeId` | 笔记读取 / 保存 |
 | GET/POST | `/api/resources` | 资源查询 / 新增 |
@@ -178,8 +184,12 @@ npx wrangler d1 execute study-plans --local --file=migrations/0004_multiuser_v2.
 | GET/PUT | `/api/profile` | 个人资料读取 / 保存 |
 | GET | `/api/me` | 当前用户身份 |
 | POST | `/api/search/semantic` | 语义搜索 |
+| POST | `/api/knowledge/jobs` | 创建服务端批量生成任务 |
+| GET | `/api/knowledge/jobs/active` · `/:id` | 恢复任务 / 查询进度 |
+| POST | `/api/knowledge/jobs/:id/cancel` · `/resume` | 取消 / 断点续跑 |
+| PATCH | `/api/knowledge/:nodeId` | 人工编辑教材（置 `is_edited`） |
 
-所有 `/api/*` 接口均按当前登录用户（`user_id`）做数据隔离。
+所有 `/api/*` 接口均按当前登录用户（`user_id`）做数据隔离；除 `/api/auth/*` 外未登录返回 401。
 
 ---
 
@@ -187,7 +197,7 @@ npx wrangler d1 execute study-plans --local --file=migrations/0004_multiuser_v2.
 
 ### 前置准备
 
-1. 创建 Cloudflare API Token（权限需覆盖 Workers Scripts / D1 / R2 / KV / Vectorize / Pages / Access）。
+1. 创建 Cloudflare API Token（权限需覆盖 Workers Scripts / D1 / R2 / KV / Vectorize / AI）。
 2. 将 Token 与 Account ID 写入 `.cf-token`（已 gitignore）：
 
 ```
@@ -204,10 +214,8 @@ npx wrangler d1 execute study-plans --local --file=migrations/0004_multiuser_v2.
 export CLOUDFLARE_API_TOKEN=<token>
 export CLOUDFLARE_ACCOUNT_ID=<account_id>
 
-# 线上执行迁移（按序）
-npx wrangler d1 execute study-plans --remote --file=migrations/0002_profile.sql
-npx wrangler d1 execute study-plans --remote --file=migrations/0003_multiuser.sql
-npx wrangler d1 execute study-plans --remote --file=migrations/0004_multiuser_v2.sql
+# 先按序应用全部线上迁移，再部署 Worker（顺序不可颠倒）
+npm run db:migrate:remote
 
 # 构建并部署（单 Worker 同域托管前端 + API）
 npm run build

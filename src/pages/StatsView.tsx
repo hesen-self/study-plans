@@ -1,18 +1,76 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as echarts from 'echarts'
-import { api, Checkin, DOMAIN_COLOR, DOMAIN_LABEL, HeatmapCell, Node, Summary } from '@/api'
+import { api, Checkin, DOMAIN_COLOR, DOMAIN_LABEL, Goals, HeatmapCell, Node, Summary } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { cnMonth, cnShift, cnToday, monthRange, weekRange } from '@/lib/date'
+import { downloadText, toCsvCell } from '@/lib/utils'
+
+function renderHeatmap(dom: HTMLDivElement, data: HeatmapCell[]) {
+  const chart = echarts.getInstanceByDom(dom) ?? echarts.init(dom)
+  chart.setOption({
+    tooltip: { formatter: (p: { data: [string, number] }) => `${p.data[0]}：${p.data[1]} 分钟` },
+    visualMap: {
+      min: 0,
+      max: Math.max(120, ...data.map((d) => d.minutes)),
+      orient: 'horizontal',
+      left: 'center',
+      bottom: 0,
+      inRange: { color: ['#F1EFE8', '#9FE1CB', '#1D9E75', '#085041'] },
+      text: ['多', '少'],
+    },
+    calendar: {
+      top: 30, left: 60, right: 20,
+      // 一律用北京时间日期，避免 UTC 导致 00:00~08:00 归到前一天
+      range: [cnShift(-365), cnToday()],
+      cellSize: ['auto', 14],
+      splitLine: { show: false },
+      itemStyle: { borderColor: '#fff' },
+      dayLabel: { fontSize: 10 },
+      monthLabel: { fontSize: 11 },
+      yearLabel: { show: false },
+    },
+    series: {
+      type: 'heatmap',
+      coordinateSystem: 'calendar',
+      data: data.map((d) => [d.date, d.minutes]),
+    },
+  })
+}
+
+function GoalBar({ label, actual, target }: { label: string; actual: number; target: number }) {
+  return (
+    <div className="min-w-[180px] flex-1">
+      <div className="mb-1 flex justify-between text-xs text-muted-foreground">
+        <span>{label}</span>
+        <span>{actual} / {target || '未设置'} 分钟</span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
+        <div
+          className="h-full bg-primary"
+          style={{ width: `${target > 0 ? Math.min(100, Math.round(actual / target * 100)) : 0}%` }}
+        />
+      </div>
+    </div>
+  )
+}
 
 export default function StatsView() {
   const [nodes, setNodes] = useState<Node[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
   const [checkins, setCheckins] = useState<Checkin[]>([])
+  const [heatmap, setHeatmap] = useState<HeatmapCell[]>([])
   const [nodeId, setNodeId] = useState('')
+  const [nodeFilter, setNodeFilter] = useState('')
   const [minutes, setMinutes] = useState(60)
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [date, setDate] = useState(cnToday)
   const [note, setNote] = useState('')
+  const [month, setMonth] = useState(cnMonth)
+  const [goals, setGoals] = useState<Goals>({ daily: 0, weekly: 0 })
+  const [draft, setDraft] = useState<Goals>({ daily: 0, weekly: 0 })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
 
   const heatmapRef = useRef<HTMLDivElement>(null)
   const pieRef = useRef<HTMLDivElement>(null)
@@ -30,71 +88,50 @@ export default function StatsView() {
     }
   }, [])
 
-  function renderHeatmap(data: HeatmapCell[]) {
-    if (!heatmapRef.current) return
-    const chart = echarts.getInstanceByDom(heatmapRef.current) ?? echarts.init(heatmapRef.current)
-    const today = new Date().toISOString().slice(0, 10)
-    const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10)
-    chart.setOption({
-      tooltip: { formatter: (p: { data: [string, number] }) => `${p.data[0]}：${p.data[1]} 分钟` },
-      visualMap: {
-        min: 0,
-        max: Math.max(120, ...data.map((d) => d.minutes)),
-        orient: 'horizontal',
-        left: 'center',
-        bottom: 0,
-        inRange: { color: ['#F1EFE8', '#9FE1CB', '#1D9E75', '#085041'] },
-        text: ['多', '少'],
-      },
-      calendar: {
-        top: 30, left: 60, right: 20,
-        range: [yearAgo, today],
-        cellSize: ['auto', 14],
-        splitLine: { show: false },
-        itemStyle: { borderColor: '#fff' },
-        dayLabel: { fontSize: 10 },
-        monthLabel: { fontSize: 11 },
-        yearLabel: { show: false },
-      },
-      series: {
-        type: 'heatmap',
-        coordinateSystem: 'calendar',
-        data: data.map((d) => [d.date, d.minutes]),
-      },
-    })
-  }
-
-  const reload = useCallback(() => {
-    api.summary().then(setSummary)
-    api.heatmap().then(renderHeatmap)
-    const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10)
-    api.checkins(yearAgo).then(setCheckins)
+  useEffect(() => {
+    api.graph().then((g) => setNodes(g.nodes)).catch(() => setError('加载知识点失败'))
+    api.goals().then((g) => { setGoals(g); setDraft(g) }).catch(() => setError('加载学习目标失败'))
   }, [])
 
+  const reload = useCallback(async () => {
+    try {
+      const { from, to } = monthRange(month)
+      const [s, h, list] = await Promise.all([
+        api.summary(),
+        api.heatmap(),
+        api.checkins(from, to, nodeFilter || undefined),
+      ])
+      setSummary(s)
+      setHeatmap(h)
+      if (heatmapRef.current) renderHeatmap(heatmapRef.current, h)
+      setCheckins(list)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载统计数据失败')
+    }
+  }, [month, nodeFilter])
+
   useEffect(() => {
-    api.graph().then((g) => setNodes(g.nodes))
-    reload()
+    // reload 内部全部为异步请求，setState 发生在 await 之后，非同步级联渲染
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void reload()
   }, [reload])
 
   useEffect(() => {
-    if (!summary) return
-    if (pieRef.current) {
-      const chart = echarts.getInstanceByDom(pieRef.current) ?? echarts.init(pieRef.current)
-      chart.setOption({
-        tooltip: { trigger: 'item', formatter: '{b}: {c} 分钟 ({d}%)' },
-        series: [{
-          type: 'pie',
-          radius: ['40%', '70%'],
-          data: summary.byDomain.map((d) => ({
-            name: DOMAIN_LABEL[d.domain] ?? d.domain,
-            value: d.minutes,
-            itemStyle: { color: DOMAIN_COLOR[d.domain] },
-          })),
-          label: { fontSize: 12 },
-        }],
-      })
-      return undefined
-    }
+    if (!summary || !pieRef.current) return
+    const chart = echarts.getInstanceByDom(pieRef.current) ?? echarts.init(pieRef.current)
+    chart.setOption({
+      tooltip: { trigger: 'item', formatter: '{b}: {c} 分钟 ({d}%)' },
+      series: [{
+        type: 'pie',
+        radius: ['40%', '70%'],
+        data: summary.byDomain.map((d) => ({
+          name: DOMAIN_LABEL[d.domain] ?? d.domain,
+          value: d.minutes,
+          itemStyle: { color: DOMAIN_COLOR[d.domain] },
+        })),
+        label: { fontSize: 12 },
+      }],
+    })
   }, [summary])
 
   useEffect(() => {
@@ -107,25 +144,66 @@ export default function StatsView() {
       series: [{ type: 'bar', data: summary.byWeek.map((w) => w.minutes), itemStyle: { color: '#378ADD', borderRadius: [4, 4, 0, 0] } }],
       grid: { left: 50, right: 16, top: 30, bottom: 30 },
     })
-    return undefined
   }, [summary])
 
   const submit = async () => {
     if (!nodeId || minutes <= 0) return
-    await api.addCheckin({ node_id: nodeId, date, minutes, note })
-    setNote('')
-    reload()
+    setBusy(true)
+    setError('')
+    try {
+      await api.addCheckin({ node_id: nodeId, date, minutes, note })
+      setNote('')
+      await reload()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '打卡失败')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const removeCheckin = async (id: number) => {
-    await api.deleteCheckin(id)
-    reload()
+    setError('')
+    try {
+      await api.deleteCheckin(id)
+      await reload()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '删除打卡失败')
+    }
   }
 
+  const saveGoals = async () => {
+    setError('')
+    try {
+      const r = await api.saveGoals({ daily: Number(draft.daily) || 0, weekly: Number(draft.weekly) || 0 })
+      const next = { daily: r.daily, weekly: r.weekly }
+      setGoals(next)
+      setDraft(next)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存目标失败')
+    }
+  }
+
+  const exportCsv = () => {
+    const header = ['日期', '知识点', '领域', '时长(分钟)', '备注']
+    const rows = checkins.map((c) => [
+      c.date, c.node_name ?? '', DOMAIN_LABEL[c.domain ?? ''] ?? c.domain ?? '',
+      c.minutes, c.note ?? '',
+    ])
+    const csv = '\uFEFF' + [header, ...rows].map((r) => r.map(toCsvCell).join(',')).join('\r\n')
+    downloadText(`checkins-${month}.csv`, csv, 'text/csv;charset=utf-8')
+  }
+
+  const todayMinutes = heatmap.find((h) => h.date === cnToday())?.minutes ?? 0
+  const week = weekRange()
+  const weekMinutes = heatmap
+    .filter((h) => h.date >= week.from && h.date <= week.to)
+    .reduce((sum, h) => sum + h.minutes, 0)
   const hours = summary ? (summary.total.minutes / 60).toFixed(1) : '0'
 
   return (
     <div>
+      {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
+
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <div className="rounded-lg border border-border bg-card p-3.5">
           <div className="text-2xl font-semibold">{summary?.streak ?? 0} 天</div>
@@ -155,22 +233,47 @@ export default function StatsView() {
             {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
           </Select>
           <Input
-            type="number"
-            min={5}
-            step={5}
-            value={minutes}
+            type="number" min={5} step={5} value={minutes}
             onChange={(e) => setMinutes(Number(e.target.value))}
             className="w-24"
+            aria-label="学习时长（分钟）"
           />
           <span className="text-sm text-muted-foreground">分钟</span>
           <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-40" />
           <Input
-            placeholder="备注（可选）"
-            value={note}
+            placeholder="备注（可选）" value={note}
             onChange={(e) => setNote(e.target.value)}
             className="min-w-[140px] flex-1"
           />
-          <Button onClick={submit} disabled={!nodeId}>打卡</Button>
+          <Button onClick={submit} disabled={!nodeId || busy}>{busy ? '提交中…' : '打卡'}</Button>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          打卡会按该知识点累计时长自动推进学习进度与路线步骤状态（每 120 分钟视为掌握）。
+        </p>
+      </div>
+
+      <div className="mb-4 rounded-lg border border-border bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-lg font-medium">学习目标</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="number" min={0} step={10} value={draft.daily}
+              onChange={(e) => setDraft({ ...draft, daily: Number(e.target.value) })}
+              className="w-24" aria-label="每日目标分钟"
+            />
+            <span className="text-xs text-muted-foreground">分钟/日</span>
+            <Input
+              type="number" min={0} step={30} value={draft.weekly}
+              onChange={(e) => setDraft({ ...draft, weekly: Number(e.target.value) })}
+              className="w-24" aria-label="每周目标分钟"
+            />
+            <span className="text-xs text-muted-foreground">分钟/周</span>
+            <Button variant="outline" size="sm" onClick={saveGoals}>保存目标</Button>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-6">
+          <GoalBar label="今日" actual={todayMinutes} target={goals.daily} />
+          <GoalBar label="本周" actual={weekMinutes} target={goals.weekly} />
         </div>
       </div>
 
@@ -191,7 +294,23 @@ export default function StatsView() {
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4">
-        <h3 className="text-lg font-medium">最近打卡记录</h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-lg font-medium">打卡记录</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="month" value={month}
+              onChange={(e) => setMonth(e.target.value || cnMonth())}
+              className="w-40" aria-label="筛选月份"
+            />
+            <Select value={nodeFilter} onChange={(e) => setNodeFilter(e.target.value)} className="w-48">
+              <option value="">全部知识点</option>
+              {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+            </Select>
+            <Button variant="outline" size="sm" onClick={exportCsv} disabled={!checkins.length}>
+              导出 CSV
+            </Button>
+          </div>
+        </div>
         <table className="mt-2 w-full border-collapse text-sm">
           <thead>
             <tr>
@@ -203,7 +322,7 @@ export default function StatsView() {
             </tr>
           </thead>
           <tbody>
-            {checkins.slice(0, 20).map((c) => (
+            {checkins.map((c) => (
               <tr key={c.id}>
                 <td className="border-b border-border p-2">{c.date}</td>
                 <td className="border-b border-border p-2">{c.node_name}</td>
@@ -216,7 +335,7 @@ export default function StatsView() {
             ))}
             {!checkins.length && (
               <tr>
-                <td colSpan={5} className="p-2 text-muted-foreground">暂无打卡记录，开始第一次打卡吧</td>
+                <td colSpan={5} className="p-2 text-muted-foreground">该筛选条件下暂无打卡记录</td>
               </tr>
             )}
           </tbody>

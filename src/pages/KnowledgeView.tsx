@@ -1,52 +1,125 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { marked } from 'marked'
-import { api, KnowledgeDoc, DOMAIN_LABEL } from '@/api'
+import { api, DOMAIN_LABEL, KnowledgeDoc, KnowledgeJob } from '@/api'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import { sanitizeHtml, safeHttpUrl } from '@/lib/sanitize'
+import { downloadText } from '@/lib/utils'
 
 marked.setOptions({ breaks: true })
 
 type TreeNode = { id: string; name: string; domain: string; level: number; parent_ids: string[] }
 type TreeItem = TreeNode & { children: TreeItem[] }
 
+function docToMarkdown(d: KnowledgeDoc): string {
+  const parts = [`# ${d.title || d.node_id}`, '']
+  if (d.content) parts.push(d.content, '')
+  if (d.code) parts.push('## 示例代码', '', '```', d.code, '```', '')
+  try {
+    const urls: unknown = JSON.parse(d.source_urls ?? '[]')
+    if (Array.isArray(urls)) {
+      const safe = urls
+        .filter((u): u is string => typeof u === 'string')
+        .map((u) => safeHttpUrl(u))
+        .filter(Boolean)
+      if (safe.length) parts.push('## 参考来源', '', ...safe.map((u, i) => `[${i + 1}] ${u}`), '')
+    }
+  } catch {
+    // source_urls 非法 JSON，忽略
+  }
+  return parts.join('\n')
+}
+
+function safeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'knowledge'
+}
+
 export default function KnowledgeView() {
   const [searchParams] = useSearchParams()
   const [nodes, setNodes] = useState<TreeNode[]>([])
   const [docs, setDocs] = useState<KnowledgeDoc[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [generating, setGenerating] = useState(false) // 一键生成中
-  const [rebuilding, setRebuilding] = useState<string | null>(null) // 单节点重新构建中的 node_id
+  const [rebuilding, setRebuilding] = useState<string | null>(null)
   const [progress, setProgress] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  // 流式生成状态：当前正在流式输出的节点 id 及其实时内容
+  // 单节点流式重新构建
   const [streamingId, setStreamingId] = useState<string | null>(null)
   const [streamTitle, setStreamTitle] = useState('')
   const [streamContent, setStreamContent] = useState('')
   const [streamCode, setStreamCode] = useState('')
-  // 折叠状态：记录被折叠的父节点 id（有子节点的节点）
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  // 服务端批处理任务
+  const [job, setJob] = useState<KnowledgeJob | null>(null)
+  const [jobBusy, setJobBusy] = useState(false)
+  const [autoContinue, setAutoContinue] = useState(true)
+  // 人工编辑教材
+  const [editing, setEditing] = useState(false)
+  const [editTitle, setEditTitle] = useState('')
+  const [editContent, setEditContent] = useState('')
+  const [editCode, setEditCode] = useState('')
+  const [savingDoc, setSavingDoc] = useState(false)
 
-  const load = useCallback(() => api.knowledge().then(setDocs), [])
+  const load = useCallback(async () => {
+    setDocs(await api.knowledge())
+  }, [])
 
   useEffect(() => {
-    Promise.all([api.knowledgeNodes(), api.knowledge()])
-      .then(([n, d]) => {
+    // activeKnowledgeJob 单独兜底：迁移未执行时也不阻塞页面加载
+    const activeJob = api.activeKnowledgeJob().catch(() => ({ job: null }))
+    Promise.all([api.knowledgeNodes(), api.knowledge(), activeJob])
+      .then(([n, d, a]) => {
         setNodes(n)
         setDocs(d)
-        // 优先定位 URL 参数指定的节点（来自知识图谱节点详情的跳转）
+        if (a.job) setJob(a.job)
         const target = searchParams.get('node')
-        if (target && n.some((item) => item.id === target)) {
-          setSelectedId(target)
-        } else if (n.length > 0) {
-          setSelectedId(n[0].id)
-        }
+        if (target && n.some((item) => item.id === target)) setSelectedId(target)
+        else if (n.length > 0) setSelectedId(n[0].id)
       })
       .catch(() => setError('加载知识库失败'))
       .finally(() => setLoading(false))
   }, [searchParams])
 
-  // node_id -> doc 映射（已生成教材的节点）
+  const jobId = job?.id
+  const jobStatus = job?.status
+  const jobActive = jobStatus === 'running' || jobStatus === 'paused'
+
+  // 轮询服务端任务状态；paused 表示本批次完成，自动续跑剩余章节
+  useEffect(() => {
+    if (!jobId || !jobActive) return
+    // 手动续跑模式下暂停态不再空转轮询，等用户点「继续生成」后再恢复
+    if (jobStatus === 'paused' && !autoContinue) return
+    let stopped = false
+    let timer = 0
+    const tick = async () => {
+      if (stopped) return
+      try {
+        const r = await api.knowledgeJob(jobId)
+        if (stopped) return
+        setJob(r.job)
+        if (r.job.status === 'completed' || r.job.status === 'cancelled') {
+          await load()
+          setProgress(r.job.status === 'completed'
+            ? `生成完成：${r.job.completed}/${r.job.total} 章，失败 ${r.job.failed} 章`
+            : '任务已取消')
+        } else if (r.job.status === 'paused' && autoContinue) {
+          const resumed = await api.resumeKnowledgeJob(jobId)
+          if (!stopped && resumed.job) setJob(resumed.job)
+        }
+      } catch (e) {
+        if (!stopped) setError(e instanceof Error ? e.message : '任务状态获取失败')
+      }
+      if (!stopped) timer = window.setTimeout(() => void tick(), 1500)
+    }
+    void tick()
+    return () => {
+      stopped = true
+      window.clearTimeout(timer)
+    }
+  }, [jobId, jobStatus, jobActive, autoContinue, load])
+
   const docMap = useMemo(() => {
     const m = new Map<string, KnowledgeDoc>()
     for (const d of docs) m.set(d.node_id, d)
@@ -54,20 +127,15 @@ export default function KnowledgeView() {
   }, [docs])
 
   // 根据 prerequisite 前置依赖构建树形目录（森林）
-  // 拓扑序保证父节点先于子节点出现，每个节点归属其第一个出现的父节点
   const tree = useMemo(() => {
     const byId = new Map<string, TreeItem>(nodes.map((n) => [n.id, { ...n, children: [] }]))
     const roots: TreeItem[] = []
     for (const n of nodes) {
       const item = byId.get(n.id)!
-      // 找第一个存在于列表中的父节点（拓扑序最早）
       let parent: TreeItem | undefined
       for (const pid of n.parent_ids) {
         const p = byId.get(pid)
-        if (p) {
-          parent = p
-          break
-        }
+        if (p) { parent = p; break }
       }
       if (parent) parent.children.push(item)
       else roots.push(item)
@@ -78,7 +146,7 @@ export default function KnowledgeView() {
   const selectedDoc = selectedId ? docMap.get(selectedId) : undefined
   const selectedNode = selectedId ? nodes.find((n) => n.id === selectedId) : undefined
 
-  // 流式生成单个节点教材：读取 SSE，实时更新标题/正文/代码
+  // 单节点流式生成：读取 SSE，实时更新标题/正文/代码
   const streamGenerate = async (nodeId: string, seq: number, detailed: boolean): Promise<boolean> => {
     setStreamingId(nodeId)
     setStreamTitle('')
@@ -87,9 +155,7 @@ export default function KnowledgeView() {
     let ok = false
     try {
       const res = await api.streamGenerateKnowledgeNode(nodeId, seq, detailed)
-      if (!res.ok || !res.body) {
-        throw new Error(`HTTP ${res.status}`)
-      }
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
@@ -97,7 +163,6 @@ export default function KnowledgeView() {
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
-        // SSE 事件以 \n\n 分隔
         let idx: number
         while ((idx = buffer.indexOf('\n\n')) !== -1) {
           const rawEvent = buffer.slice(0, idx)
@@ -105,14 +170,12 @@ export default function KnowledgeView() {
           const line = rawEvent.startsWith('data: ') ? rawEvent.slice(6) : rawEvent.startsWith('data:') ? rawEvent.slice(5) : rawEvent
           if (!line) continue
           try {
-            const evt = JSON.parse(line) as { type: string; value?: string; title?: string; message?: string }
+            const evt = JSON.parse(line) as { type: string; value?: string; message?: string }
             if (evt.type === 'title' && evt.value) setStreamTitle((p) => p + evt.value)
             else if (evt.type === 'content' && evt.value) setStreamContent((p) => p + evt.value)
             else if (evt.type === 'code' && evt.value) setStreamCode((p) => p + evt.value)
             else if (evt.type === 'done') ok = true
-            else if (evt.type === 'error') {
-              setError(evt.message || '生成失败')
-            }
+            else if (evt.type === 'error') setError(evt.message || '生成失败')
           } catch {
             // 忽略无法解析的行
           }
@@ -126,37 +189,56 @@ export default function KnowledgeView() {
     return ok
   }
 
-  // 一键生成：仅生成「尚未有教材」的节点，逐节点流式输出
-  const generate = async () => {
-    setGenerating(true)
+  // 一键生成 → 创建服务端任务；关页面后可从 active 任务恢复
+  const startJob = async (rebuild: boolean) => {
+    setJobBusy(true)
     setError('')
-    setProgress('正在获取图谱节点…')
+    setProgress('正在创建服务端生成任务…')
     try {
-      const pending = nodes.filter((n) => !docMap.has(n.id))
       if (nodes.length === 0) {
         setProgress('')
         setError('图谱为空，请先在知识图谱中构建内容')
         return
       }
-      if (pending.length === 0) {
-        setProgress('所有节点均已有教材，无需生成')
+      const r = await api.startKnowledgeJob({ rebuild })
+      if (!r.ok || !r.job) {
+        setError(r.error ?? '创建任务失败')
+        setProgress('')
         return
       }
-      let okCount = 0
-      for (let i = 0; i < pending.length; i++) {
-        setProgress(`正在生成教材（${i + 1}/${pending.length}）：${pending[i].name}…`)
-        // 选中当前正在生成的节点，让流式内容实时展示在正文区
-        setSelectedId(pending[i].id)
-        const ok = await streamGenerate(pending[i].id, i, false)
-        if (ok) okCount++
-      }
-      setProgress(`生成完成：新增 ${okCount}/${pending.length} 个章节，已跳过 ${nodes.length - pending.length} 个已有章节`)
-      await load()
+      setJob(r.job)
+      setProgress(r.reused
+        ? '已恢复进行中的生成任务'
+        : `任务已创建：共 ${r.job.total} 章，服务端后台生成中（可关闭页面）`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '生成失败')
+      setError(e instanceof Error ? e.message : '创建任务失败')
       setProgress('')
     } finally {
-      setGenerating(false)
+      setJobBusy(false)
+    }
+  }
+
+  const cancelJob = async () => {
+    if (!jobId) return
+    try {
+      await api.cancelKnowledgeJob(jobId)
+      const r = await api.knowledgeJob(jobId)
+      setJob(r.job)
+      setProgress('任务已取消，可重新发起以补齐缺失章节')
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '取消任务失败')
+    }
+  }
+
+  const resumeJob = async () => {
+    if (!jobId) return
+    try {
+      const r = await api.resumeKnowledgeJob(jobId)
+      if (r.job) setJob(r.job)
+      setProgress('已继续生成剩余章节')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '继续任务失败')
     }
   }
 
@@ -177,6 +259,56 @@ export default function KnowledgeView() {
     }
   }
 
+  const openEdit = () => {
+    if (!selectedDoc) return
+    setEditTitle(selectedDoc.title)
+    setEditContent(selectedDoc.content)
+    setEditCode(selectedDoc.code)
+    setEditing(true)
+  }
+
+  const saveEdit = async () => {
+    if (!selectedDoc) return
+    setSavingDoc(true)
+    setError('')
+    try {
+      await api.updateKnowledgeDoc(selectedDoc.node_id, {
+        title: editTitle, content: editContent, code: editCode,
+      })
+      setEditing(false)
+      await load()
+      setProgress('已保存教材修改（后续批量生成将跳过本章）')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存失败')
+    } finally {
+      setSavingDoc(false)
+    }
+  }
+
+  const exportCurrent = () => {
+    if (!selectedDoc) return
+    downloadText(
+      `${safeFileName(selectedDoc.title || selectedDoc.node_id)}.md`,
+      docToMarkdown(selectedDoc),
+      'text/markdown;charset=utf-8'
+    )
+  }
+
+  const exportAll = () => {
+    const sorted = [...docs].sort((a, b) => a.seq - b.seq)
+    if (!sorted.length) {
+      setError('暂无可导出的教材')
+      return
+    }
+    const text = [
+      '# 学习知识库', '',
+      `导出时间：${new Date().toLocaleString('zh-CN')}`, '',
+      ...sorted.flatMap((d) => [docToMarkdown(d), '---', '']),
+    ].join('\n')
+    downloadText('study-plans-knowledge.md', text, 'text/markdown;charset=utf-8')
+    setProgress(`已导出 ${sorted.length} 章教材`)
+  }
+
   const toggleCollapse = (id: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev)
@@ -186,18 +318,23 @@ export default function KnowledgeView() {
     })
   }
 
-  const renderSources = (raw: string) => {
-    let urls: string[]
+  const renderSources = (raw: string | null) => {
+    let urls: unknown
     try {
-      urls = JSON.parse(raw) as string[]
+      urls = JSON.parse(raw ?? '[]')
     } catch {
       return null
     }
-    if (urls.length === 0) return null
+    if (!Array.isArray(urls)) return null
+    const safe = urls
+      .filter((u): u is string => typeof u === 'string')
+      .map((u) => safeHttpUrl(u))
+      .filter(Boolean)
+    if (!safe.length) return null
     return (
       <div className="mt-4 border-t border-border pt-3 text-xs text-muted-foreground">
         <span className="mr-1">参考来源：</span>
-        {urls.map((u, i) => (
+        {safe.map((u, i) => (
           <a key={i} href={u} target="_blank" rel="noopener noreferrer" className="mr-2 text-primary hover:underline">
             [{i + 1}]
           </a>
@@ -206,7 +343,6 @@ export default function KnowledgeView() {
     )
   }
 
-  // 递归渲染目录树节点
   const renderTreeItem = (item: TreeItem, depth: number) => {
     const hasChildren = item.children.length > 0
     const isCollapsed = collapsed.has(item.id)
@@ -220,23 +356,22 @@ export default function KnowledgeView() {
           }`}
           style={{ paddingLeft: `${0.5 + depth * 1}rem` }}
         >
-          {/* 折叠箭头（有子节点才显示） */}
           <button
             onClick={() => hasChildren && toggleCollapse(item.id)}
             className={`flex h-6 w-5 shrink-0 items-center justify-center text-xs text-muted-foreground transition-transform ${
               hasChildren ? 'cursor-pointer hover:text-foreground' : 'cursor-default opacity-0'
             } ${isCollapsed ? '' : 'rotate-90'}`}
             aria-label={hasChildren ? (isCollapsed ? '展开' : '折叠') : undefined}
+            aria-expanded={hasChildren ? !isCollapsed : undefined}
           >
             ▶
           </button>
-          {/* 节点主体：点击选中 */}
           <button
-            onClick={() => setSelectedId(item.id)}
+            onClick={() => { setSelectedId(item.id); setEditing(false) }}
             className="flex min-w-0 flex-1 items-center justify-between py-1.5 pr-2"
           >
             <span className="truncate">{item.name}</span>
-            <span className={`ml-2 h-1.5 w-1.5 shrink-0 rounded-full ${has ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+            <span className={`ml-2 h-1.5 w-1.5 shrink-0 rounded-full ${has ? 'bg-primary' : 'bg-muted-foreground/40'}`} />
           </button>
         </div>
         {hasChildren && !isCollapsed && (
@@ -250,20 +385,56 @@ export default function KnowledgeView() {
     return <p className="mt-8 text-center text-sm text-muted-foreground">加载中…</p>
   }
 
+  const percent = job?.total ? Math.round((job.completed / job.total) * 100) : 0
+
   return (
     <div className="mx-auto max-w-6xl">
-      {/* 顶栏 */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">知识库</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            根据知识图谱逐节点联网查询并总结生成的教材，含技术类 demo 代码。
+            服务端按拓扑序批量生成教材，任务可取消、可断点续跑；教材支持人工编辑与导出。
           </p>
         </div>
-        <Button onClick={generate} disabled={generating}>
-          {generating ? '生成中…' : '一键生成知识库'}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={exportAll} disabled={!docs.length}>导出整本</Button>
+          <Button variant="outline" size="sm" onClick={() => startJob(true)} disabled={jobBusy || jobActive || !nodes.length}>
+            重建全部
+          </Button>
+          <Button onClick={() => startJob(false)} disabled={jobBusy || jobActive || !nodes.length}>
+            {jobActive ? '任务进行中' : jobBusy ? '创建中…' : '一键生成知识库'}
+          </Button>
+        </div>
       </div>
+
+      {jobActive && job && (
+        <div className="mt-3 rounded-lg border border-border bg-card p-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>
+              服务端任务：{job.status === 'running' ? '生成中' : '本批完成，待续跑'} · {job.completed}/{job.total} 章 · 失败 {job.failed} 章
+              {job.current_node && <span className="ml-2 text-muted-foreground">当前：{job.current_node}</span>}
+            </span>
+            <div className="flex gap-2">
+              {job.status === 'paused' && !autoContinue && (
+                <Button size="sm" onClick={resumeJob}>继续生成</Button>
+              )}
+              <Button variant="outline" size="sm" onClick={cancelJob}>取消任务</Button>
+            </div>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary">
+            <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
+          </div>
+          <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={autoContinue}
+              onChange={(e) => setAutoContinue(e.target.checked)}
+              className="accent-primary"
+            />
+            自动续跑剩余章节（关闭后需手动点「继续生成」）
+          </label>
+        </div>
+      )}
 
       {(progress || error) && (
         <p className={`mt-3 text-sm ${error ? 'text-destructive' : 'text-muted-foreground'}`}>
@@ -277,7 +448,6 @@ export default function KnowledgeView() {
         </div>
       ) : (
         <div className="mt-6 flex gap-6">
-          {/* 左侧目录树（可折叠菜单） */}
           <aside className="w-64 shrink-0">
             <div className="sticky top-4 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-lg border border-border bg-card">
               <div className="border-b border-border px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -289,14 +459,14 @@ export default function KnowledgeView() {
             </div>
           </aside>
 
-          {/* 右侧正文 */}
           <main className="min-w-0 flex-1">
             {selectedNode ? (
               <article className="rounded-lg border border-border bg-card p-6">
-                <div className="mb-4 flex items-start justify-between gap-4">
+                <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
                   <div>
                     <div className="mb-1 text-xs text-muted-foreground">
                       {DOMAIN_LABEL[selectedNode.domain] ?? selectedNode.domain} · 难度 {selectedNode.level}
+                      {selectedDoc?.is_edited === 1 && <span className="ml-2 text-primary">已人工编辑</span>}
                     </div>
                     <h2 className="text-xl font-semibold tracking-tight">
                       {streamingId === selectedId && streamTitle
@@ -304,23 +474,30 @@ export default function KnowledgeView() {
                         : (selectedDoc?.title ?? selectedNode.name)}
                     </h2>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => rebuild(selectedNode)}
-                    disabled={rebuilding === selectedNode.id || generating}
-                  >
-                    {rebuilding === selectedNode.id ? '构建中…' : '重新构建'}
-                  </Button>
+                  <div className="flex gap-2">
+                    {selectedDoc && !editing && streamingId !== selectedId && (
+                      <>
+                        <Button variant="outline" size="sm" onClick={exportCurrent}>导出本章</Button>
+                        <Button variant="outline" size="sm" onClick={openEdit}>编辑</Button>
+                      </>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => rebuild(selectedNode)}
+                      disabled={rebuilding === selectedNode.id || jobActive || streamingId !== null}
+                    >
+                      {rebuilding === selectedNode.id ? '构建中…' : '重新构建'}
+                    </Button>
+                  </div>
                 </div>
 
                 {streamingId === selectedId ? (
-                  // 流式生成中：实时渲染
                   <>
                     {streamContent ? (
                       <div
                         className="kb-content"
-                        dangerouslySetInnerHTML={{ __html: marked.parse(streamContent) as string }}
+                        dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parse(streamContent) as string) }}
                       />
                     ) : (
                       <div className="text-sm text-muted-foreground">
@@ -331,26 +508,45 @@ export default function KnowledgeView() {
                     {streamCode && (
                       <div className="mt-4 overflow-hidden rounded-md border border-border bg-secondary/50">
                         <div className="border-b border-border px-3 py-1.5 text-xs text-muted-foreground">示例代码</div>
-                        <pre className="overflow-x-auto p-3 text-xs leading-relaxed">
-                          <code>{streamCode}</code>
-                        </pre>
+                        <pre className="overflow-x-auto p-3 text-xs leading-relaxed"><code>{streamCode}</code></pre>
                       </div>
                     )}
                   </>
+                ) : editing && selectedDoc ? (
+                  <div className="space-y-3">
+                    <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} aria-label="章节标题" />
+                    <Textarea
+                      value={editContent}
+                      onChange={(e) => setEditContent(e.target.value)}
+                      className="min-h-[320px] font-mono"
+                      aria-label="章节正文（Markdown）"
+                    />
+                    <div>
+                      <label className="mb-1 block text-xs text-muted-foreground">示例代码</label>
+                      <Textarea
+                        value={editCode}
+                        onChange={(e) => setEditCode(e.target.value)}
+                        className="min-h-[120px] font-mono"
+                        aria-label="示例代码"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <Button onClick={saveEdit} disabled={savingDoc}>{savingDoc ? '保存中…' : '保存'}</Button>
+                      <Button variant="outline" onClick={() => setEditing(false)}>取消</Button>
+                    </div>
+                  </div>
                 ) : selectedDoc ? (
                   <>
                     {selectedDoc.content && (
                       <div
                         className="kb-content"
-                        dangerouslySetInnerHTML={{ __html: marked.parse(selectedDoc.content) as string }}
+                        dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parse(selectedDoc.content) as string) }}
                       />
                     )}
                     {selectedDoc.code && (
                       <div className="mt-4 overflow-hidden rounded-md border border-border bg-secondary/50">
                         <div className="border-b border-border px-3 py-1.5 text-xs text-muted-foreground">示例代码</div>
-                        <pre className="overflow-x-auto p-3 text-xs leading-relaxed">
-                          <code>{selectedDoc.code}</code>
-                        </pre>
+                        <pre className="overflow-x-auto p-3 text-xs leading-relaxed"><code>{selectedDoc.code}</code></pre>
                       </div>
                     )}
                     {renderSources(selectedDoc.source_urls)}
