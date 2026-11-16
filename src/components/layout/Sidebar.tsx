@@ -49,7 +49,7 @@ export default function Sidebar({ displayName, onNavigate }: SidebarProps) {
     <aside className="rail m-rail" aria-label="主导航">
       <div className="rail-brand">
         <span className="brand-mark" aria-hidden="true">
-          <span className="brand-dot" />
+          <img src="/favicon.svg" alt="" width={34} height={34} className="brand-mark-img" />
         </span>
         <div className="brand-text">
           <div className="brand-name">学习提升</div>

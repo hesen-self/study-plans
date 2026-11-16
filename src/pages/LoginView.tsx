@@ -90,9 +90,13 @@ export default function LoginView({ onLogin }: { onLogin: () => void }) {
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-8 shadow-sm">
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-xl font-semibold text-primary-foreground">
-            学
-          </div>
+          <img
+            src="/favicon.svg"
+            alt="学习提升"
+            width={48}
+            height={48}
+            className="mx-auto mb-4 h-12 w-12 rounded-xl shadow-sm"
+          />
           <h1 className="text-xl font-semibold tracking-tight">学习提升系统</h1>
           <p className="mt-1 text-sm text-muted-foreground">私人学习知识图谱 · 请登录</p>
         </div>

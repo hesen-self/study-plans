@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="f`ÐG">
+  <!-- Íà»ƒÁLñrÒb + åÆþ1‚¹ + Rà;‚¹ -->
+  <rect width="32" height="32" rx="8" fill="#131619"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7.5" fill="none" stroke="#ffffff" stroke-opacity="0.12"/>
+
+  <!-- Þ¿ -->
+  <path d="M10.5 20.5 L16 12.5 L21.5 20.5" fill="none" stroke="#6b757a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M16 12.5 L22 13.5" fill="none" stroke="#6b757a" stroke-width="1.6" stroke-linecap="round"/>
+
+  <!-- !‚¹ -->
+  <circle cx="10.5" cy="20.5" r="2.4" fill="#99a2a5"/>
+  <circle cx="21.5" cy="20.5" r="2.4" fill="#236de9"/>
+
+  <!-- ;‚¹Rà + áI¯ -->
+  <circle cx="16" cy="12.5" r="5.2" fill="#82dd2d" fill-opacity="0.22"/>
+  <circle cx="16" cy="12.5" r="3.1" fill="#82dd2d"/>
+</svg>
