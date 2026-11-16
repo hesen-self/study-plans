@@ -179,6 +179,25 @@ export async function chat(
 /**
  * 调用聊天模型，返回流式纯文本（ReadableStream<Uint8Array>）。
  */
+function enqueueSseResponseLine(
+  line: string,
+  enc: TextEncoder,
+  controller: TransformStreamDefaultController<Uint8Array>
+) {
+  const t = line.trim()
+  if (!t.startsWith('data:')) return
+  const payload = t.slice(5).trim()
+  if (!payload || payload === '[DONE]') return
+  try {
+    const parsed = JSON.parse(payload) as { response?: string }
+    if (typeof parsed.response === 'string' && parsed.response) {
+      controller.enqueue(enc.encode(parsed.response))
+    }
+  } catch {
+    // 忽略无法解析的行
+  }
+}
+
 export async function chatStream(
   env: EnvWithSearch,
   messages: { role: string; content: string }[],
@@ -210,20 +229,13 @@ export async function chatStream(
           buffer += dec.decode(chunk, { stream: true })
           const lines = buffer.split('\n')
           buffer = lines.pop() ?? ''
-          for (const line of lines) {
-            const t = line.trim()
-            if (!t.startsWith('data:')) continue
-            const payload = t.slice(5).trim()
-            if (!payload || payload === '[DONE]') continue
-            try {
-              const parsed = JSON.parse(payload) as { response?: string }
-              if (typeof parsed.response === 'string' && parsed.response) {
-                controller.enqueue(enc.encode(parsed.response))
-              }
-            } catch {
-              // 忽略无法解析的行
-            }
-          }
+          for (const line of lines) enqueueSseResponseLine(line, enc, controller)
+        },
+        // 末帧常无换行，不 flush 会丢掉最后一段 token → 整段 JSON/正文残缺
+        flush(controller) {
+          buffer += dec.decode()
+          if (buffer.trim()) enqueueSseResponseLine(buffer, enc, controller)
+          buffer = ''
         },
       })
     )
@@ -677,31 +689,83 @@ ${intent}
   return { draft: next, reply, searchConfigured: isSearchConfigured(env) }
 }
 
-function parseLessonPayload(
+/** 从不完整 / 非法 JSON 中尽量抽出字符串字段（模型常在 content 里写裸换行） */
+export function extractPartialJsonString(acc: string, field: string): string {
+  const key = `"${field}"`
+  const keyIdx = acc.indexOf(key)
+  if (keyIdx === -1) return ''
+  const afterKey = acc.slice(keyIdx + key.length)
+  const colon = afterKey.match(/^\s*:\s*/)
+  if (!colon) return ''
+  let i = colon[0].length
+  if (afterKey[i] !== '"') return ''
+  i += 1
+  let out = ''
+  while (i < afterKey.length) {
+    const ch = afterKey[i]
+    if (ch === '\\' && i + 1 < afterKey.length) {
+      const next = afterKey[i + 1]
+      if (next === 'n') out += '\n'
+      else if (next === 't') out += '\t'
+      else if (next === 'r') out += '\r'
+      else if (next === '"' || next === '\\' || next === '/') out += next
+      else out += next
+      i += 2
+      continue
+    }
+    if (ch === '"') break
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+function parseLessonMarkers(
   raw: string,
   nodeName: string
 ): { title: string; content: string; code: string } | null {
+  const titleStart = raw.indexOf('【标题】')
+  const contentStart = raw.indexOf('【正文】')
+  const codeStart = raw.indexOf('【代码】')
+  if (contentStart === -1) return null
+  const title =
+    titleStart !== -1 && titleStart < contentStart
+      ? raw.slice(titleStart + 4, contentStart).trim()
+      : nodeName
+  const content = raw
+    .slice(contentStart + 4, codeStart > contentStart ? codeStart : undefined)
+    .trim()
+  if (!content) return null
+  const code = codeStart !== -1 ? raw.slice(codeStart + 4).trim() : ''
+  return { title: title || nodeName, content, code }
+}
+
+/** 解析教材 LLM 输出：标记格式优先，其次合法 JSON，再兜底残缺 JSON 字段 */
+export function parseLessonPayload(
+  raw: string,
+  nodeName: string
+): { title: string; content: string; code: string } | null {
+  const byMarker = parseLessonMarkers(raw, nodeName)
+  if (byMarker) return byMarker
+
   const json = extractJson(raw) as { title?: unknown; content?: unknown; code?: unknown } | null
   if (json && (json.content || json.title)) {
     const content = String(json.content ?? '').trim()
-    if (!content) return null
-    return {
-      title: String(json.title ?? nodeName).trim() || nodeName,
-      content,
-      code: String(json.code ?? '').trim(),
+    if (content) {
+      return {
+        title: String(json.title ?? nodeName).trim() || nodeName,
+        content,
+        code: String(json.code ?? '').trim(),
+      }
     }
   }
-  // 兼容旧分隔标记格式
-  const titleMatch = raw.match(/【标题】\s*([\s\S]*?)【正文】/)
-  const contentMatch = raw.match(/【正文】\s*([\s\S]*?)【代码】/)
-  const codeMatch = raw.match(/【代码】\s*([\s\S]*)$/)
-  const content = (contentMatch?.[1] ?? '').trim()
+
+  // JSON.parse 失败（裸换行 / 截断）时仍尽量抽出字段
+  const content = extractPartialJsonString(raw, 'content').trim()
   if (!content) return null
-  return {
-    title: (titleMatch?.[1] ?? nodeName).trim() || nodeName,
-    content,
-    code: (codeMatch?.[1] ?? '').trim(),
-  }
+  const title = extractPartialJsonString(raw, 'title').trim() || nodeName
+  const code = extractPartialJsonString(raw, 'code').trim()
+  return { title, content, code }
 }
 
 /**
@@ -728,7 +792,11 @@ export async function generateNodeLesson(
     const retry = await chat(env, [
       { role: 'user', content: prompt },
       { role: 'assistant', content: raw.slice(0, 1500) },
-      { role: 'user', content: '请改为只输出 JSON：{"title":"...","content":"markdown","code":"..."}' },
+      {
+        role: 'user',
+        content:
+          '请改为只输出标记格式（不要 JSON、不要围栏）：\n【标题】\n标题\n【正文】\n正文 markdown\n【代码】\n代码或留空',
+      },
     ], detailed ? 5000 : 3000, CHAT_MODEL)
     parsed = parseLessonPayload(retry, node.name)
   }
@@ -754,11 +822,16 @@ ${searchText ? `联网搜索到的参考资料：\n${searchText}\n` : ''}
 1. 用中文，通俗易懂，结构清晰（可用标题、列表）。
 2. 正文内容：核心概念、原理、要点、常见误区，${node.level === 1 ? '面向零基础，循序渐进' : '面向有一定基础的读者，突出重点难点'}。
 ${detailed ? '3. 这是「重新构建」模式，请比常规版本更深入细致：补充背景与演进、关键原理剖析、实践建议、常见问题与排查思路、进阶延伸。\n' : ''}
-${detailed ? '' : '3. '}${isTech ? '这是技术类知识点，请在 code 中提供简单 demo 代码（附注释）。' : '这是非技术类知识点，code 留空字符串。'}
-${detailed && isTech ? 'code 可含多个关键片段，覆盖主要用法。' : ''}
+${detailed ? '' : '3. '}${isTech ? '这是技术类知识点，请在【代码】中提供简单 demo 代码（附注释）。' : '这是非技术类知识点，【代码】段留空即可。'}
+${detailed && isTech ? '代码段可含多个关键片段，覆盖主要用法。' : ''}
 
-只输出 JSON（不要 markdown 围栏）：
-{"title":"教材标题","content":"正文 markdown","code":"${isTech ? 'demo 代码或空字符串' : ''}"}`
+只输出以下标记格式（不要 JSON、不要其它说明、不要用 markdown 代码围栏包住整篇）：
+【标题】
+教材标题
+【正文】
+正文 markdown
+【代码】
+${isTech ? 'demo 代码；没有则留空' : '（留空）'}`
 }
 
 /**

@@ -17,6 +17,8 @@ import {
   generateNodeLesson,
   generateNodeLessonStream,
   isSearchConfigured,
+  extractPartialJsonString,
+  parseLessonPayload,
   previewDraftConflicts,
   reviseGraphDraft,
   sanitizeGraphDraft,
@@ -1362,16 +1364,30 @@ app.post('/api/knowledge/stream-generate', async (c) => {
         controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
       }
       const reader = stream.getReader()
+      const textDec = new TextDecoder()
       // 增量解析游标（闭包内，隔离每个请求）
       let prevTitleLen = 0
       let prevContentLen = 0
       let prevCodeLen = 0
+      const saveLesson = async (lesson: { title: string; content: string; code: string }, urls: string[]) => {
+        await c.env.DB.prepare(
+          `INSERT INTO knowledge_docs (user_id, node_id, title, content, code, source_urls, domain, seq)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(user_id, node_id) DO UPDATE SET
+             title = excluded.title, content = excluded.content, code = excluded.code,
+             source_urls = excluded.source_urls, domain = excluded.domain, seq = excluded.seq,
+             is_edited = 0, updated_at = datetime('now', '+8 hours')`
+        ).bind(
+          uid, node.id, lesson.title, lesson.content, lesson.code,
+          JSON.stringify(urls), node.domain, seq
+        ).run()
+      }
       try {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
-          acc += new TextDecoder().decode(value)
-          // 实时解析三段边界，推送增量
+          // 复用 Decoder + stream:true，避免中文等多字节字符跨 chunk 被截断
+          acc += textDec.decode(value, { stream: true })
           const parsed = parseStreamingLesson(acc, prevTitleLen, prevContentLen, prevCodeLen)
           prevTitleLen = parsed.titleLen
           prevContentLen = parsed.contentLen
@@ -1380,30 +1396,45 @@ app.post('/api/knowledge/stream-generate', async (c) => {
           if (parsed.contentDelta) send({ type: 'content', value: parsed.contentDelta })
           if (parsed.codeDelta) send({ type: 'code', value: parsed.codeDelta })
         }
+        acc += textDec.decode()
 
-        // 流结束，解析最终完整结构并落库
-        const final = parseLessonFull(acc, node.name)
-        finished = true
-        if (final.content) {
+        // 流结束：标记 / JSON / 残缺 JSON 统一解析
+        let final = parseLessonPayload(acc, node.name)
+        // 流式解析仍失败时，回退非流式路径（含一次重试）
+        if (!final?.content) {
+          console.error(
+            `stream generate parse failed for ${node_id}, len=${acc.length}`,
+            JSON.stringify(acc).slice(0, 600)
+          )
           try {
-            await c.env.DB.prepare(
-              `INSERT INTO knowledge_docs (user_id, node_id, title, content, code, source_urls, domain, seq)
-               VALUES (?,?,?,?,?,?,?,?)
-               ON CONFLICT(user_id, node_id) DO UPDATE SET
-                 title = excluded.title, content = excluded.content, code = excluded.code,
-                 source_urls = excluded.source_urls, domain = excluded.domain, seq = excluded.seq,
-                 is_edited = 0, updated_at = datetime('now', '+8 hours')`
-            ).bind(
-              uid, node.id, final.title, final.content, final.code,
-              JSON.stringify(sourceUrls), node.domain, seq
-            ).run()
+            const fallback = await generateNodeLesson(c.env, node, detailed === true)
+            final = {
+              title: fallback.title,
+              content: fallback.content,
+              code: fallback.code,
+            }
+            // 非流式成功时补推正文，避免前端空白
+            if (fallback.content) send({ type: 'content', value: fallback.content })
+            if (fallback.code) send({ type: 'code', value: fallback.code })
+            await saveLesson(final, fallback.source_urls)
+            finished = true
             send({ type: 'done', title: final.title, node_id: node.id })
-          } catch (e) {
-            console.error(`stream generate save failed for ${node_id}`, e)
-            send({ type: 'error', message: '教材已生成但保存失败' })
+            return
+          } catch (fallbackErr) {
+            console.error(`stream generate fallback failed for ${node_id}`, fallbackErr)
+            finished = true
+            send({ type: 'error', message: '教材生成失败' })
+            return
           }
-        } else {
-          send({ type: 'error', message: '教材生成失败' })
+        }
+
+        finished = true
+        try {
+          await saveLesson(final, sourceUrls)
+          send({ type: 'done', title: final.title, node_id: node.id })
+        } catch (e) {
+          console.error(`stream generate save failed for ${node_id}`, e)
+          send({ type: 'error', message: '教材已生成但保存失败' })
         }
       } catch (e) {
         console.error('stream generate failed', e)
@@ -1424,61 +1455,54 @@ app.post('/api/knowledge/stream-generate', async (c) => {
   })
 })
 
-// 增量解析：从累积文本中识别「标题/正文/代码」三段，返回各段的增量
-// 通过传入上次已推送的边界长度，只推新增部分
+// 增量解析：标记格式优先（当前 prompt），兼容 JSON / 残缺 JSON
 function parseStreamingLesson(
   acc: string,
   prevTitleLen: number,
   prevContentLen: number,
   prevCodeLen: number
 ): { titleDelta: string; contentDelta: string; codeDelta: string; titleLen: number; contentLen: number; codeLen: number } {
-  // 定位三个标记
-  const titleStart = acc.indexOf('【标题】')
-  const contentStart = acc.indexOf('【正文】')
-  const codeStart = acc.indexOf('【代码】')
-
   let title = ''
   let content = ''
   let code = ''
 
-  if (titleStart !== -1) {
-    const end = contentStart !== -1 ? contentStart : acc.length
-    if (end > titleStart + 4) title = acc.slice(titleStart + 4, end)
-  }
-  if (contentStart !== -1) {
-    const end = codeStart !== -1 ? codeStart : acc.length
-    if (end > contentStart + 4) content = acc.slice(contentStart + 4, end)
-  }
-  if (codeStart !== -1 && acc.length > codeStart + 4) {
-    code = acc.slice(codeStart + 4)
-  }
+  const titleStart = acc.indexOf('【标题】')
+  const contentStart = acc.indexOf('【正文】')
+  const codeStart = acc.indexOf('【代码】')
 
-  const titleDelta = title.slice(prevTitleLen)
-  const contentDelta = content.slice(prevContentLen)
-  const codeDelta = code.slice(prevCodeLen)
+  if (contentStart !== -1 || titleStart !== -1) {
+    if (titleStart !== -1) {
+      const end = contentStart !== -1 ? contentStart : acc.length
+      if (end > titleStart + 4) title = acc.slice(titleStart + 4, end)
+    }
+    if (contentStart !== -1) {
+      const end = codeStart !== -1 ? codeStart : acc.length
+      if (end > contentStart + 4) content = acc.slice(contentStart + 4, end)
+    }
+    if (codeStart !== -1 && acc.length > codeStart + 4) {
+      code = acc.slice(codeStart + 4)
+    }
+  } else {
+    const complete = parseLessonPayload(acc, '')
+    if (complete) {
+      title = complete.title
+      content = complete.content
+      code = complete.code
+    } else {
+      title = extractPartialJsonString(acc, 'title')
+      content = extractPartialJsonString(acc, 'content')
+      code = extractPartialJsonString(acc, 'code')
+    }
+  }
 
   return {
-    titleDelta,
-    contentDelta,
-    codeDelta,
+    titleDelta: title.slice(prevTitleLen),
+    contentDelta: content.slice(prevContentLen),
+    codeDelta: code.slice(prevCodeLen),
     titleLen: title.length,
     contentLen: content.length,
     codeLen: code.length,
   }
-}
-
-// 最终完整解析（复用 generateNodeLesson 的解析逻辑）
-function parseLessonFull(raw: string, fallbackName: string): { title: string; content: string; code: string } {
-  const titleMatch = raw.match(/【标题】\s*([\s\S]*?)【正文】/)
-  const title = (titleMatch?.[1] ?? fallbackName).trim()
-  // 与增量解析保持一致：缺少「【代码】」标记时，正文取到文末，避免看到内容却落库失败
-  const contentStart = raw.indexOf('【正文】')
-  const codeStart = raw.indexOf('【代码】')
-  const content = contentStart !== -1
-    ? raw.slice(contentStart + 4, codeStart > contentStart ? codeStart : undefined).trim()
-    : ''
-  const code = codeStart !== -1 ? raw.slice(codeStart + 4).trim() : ''
-  return { title: title || fallbackName, content, code }
 }
 
 // 获取拓扑序节点列表（供前端逐节点生成时使用）
