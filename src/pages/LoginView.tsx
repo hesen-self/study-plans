@@ -91,7 +91,7 @@ export default function LoginView({ onLogin }: { onLogin: () => void }) {
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-8 shadow-sm">
         <div className="mb-8 text-center">
           <img
-            src="/favicon.svg"
+            src="/favicon-32.png"
             alt="学习提升"
             width={48}
             height={48}
