@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AgentIntent,
+  AgentSessionMemory,
   api,
   ChatTurn,
   Domain,
@@ -33,6 +35,34 @@ type Session = {
   sources: WebSearchHit[]
   searchConfigured?: boolean
   conflicts?: DraftConflicts | null
+  memory?: AgentSessionMemory
+  lastIntent?: AgentIntent
+  suggestions?: string[]
+}
+
+type MsgMeta = { intent?: AgentIntent }
+
+function emptyMemory(): AgentSessionMemory {
+  return { pendingClarify: null, focusNodeIds: [], sessionPreferences: [] }
+}
+
+function normalizeMemory(raw: unknown): AgentSessionMemory {
+  if (!raw || typeof raw !== 'object') return emptyMemory()
+  const m = raw as AgentSessionMemory
+  return {
+    pendingClarify: m.pendingClarify ?? null,
+    focusNodeIds: Array.isArray(m.focusNodeIds) ? m.focusNodeIds.slice(0, 3) : [],
+    lastIntent: m.lastIntent,
+    sessionPreferences: Array.isArray(m.sessionPreferences) ? m.sessionPreferences.slice(0, 5) : [],
+  }
+}
+
+function intentLabel(intent?: AgentIntent): string {
+  if (intent === 'consult') return '答疑'
+  if (intent === 'clarify') return '待确认'
+  if (intent === 'revise') return '已改稿'
+  if (intent === 'build') return '已建图'
+  return ''
 }
 
 const SESSION_KEY = 'study-plans:graph-agent-session'
@@ -71,9 +101,11 @@ function validDraft(d: unknown): d is GraphDraft {
 function readSession(key: string): Session {
   try {
     const raw = sessionStorage.getItem(key) ?? (key === SESSION_KEY ? null : localStorage.getItem(key))
-    if (!raw) return { messages: [], draft: null, sources: [] }
-    const parsed = JSON.parse(raw) as Session
-    if (!parsed || !Array.isArray(parsed.messages)) return { messages: [], draft: null, sources: [] }
+    if (!raw) return { messages: [], draft: null, sources: [], memory: emptyMemory(), suggestions: [] }
+    const parsed = JSON.parse(raw) as Session & { messageMeta?: MsgMeta[] }
+    if (!parsed || !Array.isArray(parsed.messages)) {
+      return { messages: [], draft: null, sources: [], memory: emptyMemory(), suggestions: [] }
+    }
     const messages = parsed.messages
       .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
       .slice(-MAX_TURNS)
@@ -83,9 +115,12 @@ function readSession(key: string): Session {
       sources: Array.isArray(parsed.sources) ? parsed.sources : [],
       searchConfigured: parsed.searchConfigured,
       conflicts: parsed.conflicts ?? null,
+      memory: normalizeMemory(parsed.memory),
+      lastIntent: parsed.lastIntent,
+      suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
     }
   } catch {
-    return { messages: [], draft: null, sources: [] }
+    return { messages: [], draft: null, sources: [], memory: emptyMemory(), suggestions: [] }
   }
 }
 
@@ -115,11 +150,12 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
   const [session, setSession] = useState<Session>(() => readSession(SESSION_KEY))
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [phase, setPhase] = useState<'searching' | 'generating' | ''>('')
+  const [phase, setPhase] = useState<'searching' | 'generating' | 'classifying' | ''>('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [linkExisting, setLinkExisting] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [assistantIntents, setAssistantIntents] = useState<Record<number, AgentIntent>>({})
   const abortRef = useRef<AbortController | null>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
@@ -219,16 +255,25 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
           messages,
           draft: session.draft,
           anchor: scene === 'extend' || scene === 'build' ? anchor : null,
+          memory: session.memory ?? emptyMemory(),
         },
         {
           onPhase: (p) => setPhase(p),
           onResult: (r) => {
+            const nextMessages = [...messages, { role: 'assistant' as const, content: r.reply }]
+            const assistantIdx = nextMessages.length - 1
+            if (r.intent) {
+              setAssistantIntents((prev) => ({ ...prev, [assistantIdx]: r.intent! }))
+            }
             persist({
-              messages: [...messages, { role: 'assistant', content: r.reply }],
+              messages: nextMessages,
               draft: r.draft,
               sources: r.sources ?? [],
               searchConfigured: r.searchConfigured,
               conflicts: r.conflicts ?? null,
+              memory: normalizeMemory(r.memory ?? session.memory),
+              lastIntent: r.intent,
+              suggestions: r.suggestions ?? [],
             })
           },
           onError: (err) => {
@@ -268,7 +313,8 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
       let msg = `已新建 ${r.nodes} 个节点、${r.edges} 条连线`
       if (r.linked) msg += `（含 ${r.linked} 条挂接到已有节点）`
       setNotice(msg + '，图谱已刷新')
-      persist({ messages: [], draft: null, sources: [], conflicts: null })
+      persist({ messages: [], draft: null, sources: [], conflicts: null, memory: emptyMemory(), suggestions: [] })
+      setAssistantIntents({})
       onBuilt()
     } catch (e) {
       setError(classifyError(e instanceof Error ? e.message : '新建失败'))
@@ -285,7 +331,8 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
       await api.applyGraphDraft(session.draft, { linkExisting: linkExisting || scene === 'extend' })
       const r = await api.draftToRoadmap(session.draft)
       setNotice(`已新建图谱，并生成路线「${r.name}」（${r.steps} 步）`)
-      persist({ messages: [], draft: null, sources: [], conflicts: null })
+      persist({ messages: [], draft: null, sources: [], conflicts: null, memory: emptyMemory(), suggestions: [] })
+      setAssistantIntents({})
       onBuilt()
     } catch (e) {
       setError(classifyError(e instanceof Error ? e.message : '生成路线失败'))
@@ -296,7 +343,8 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
 
   const reset = () => {
     abortRef.current?.abort()
-    persist({ messages: [], draft: null, sources: [], conflicts: null })
+    persist({ messages: [], draft: null, sources: [], conflicts: null, memory: emptyMemory(), suggestions: [] })
+    setAssistantIntents({})
     setInput('')
     setError('')
     setNotice('')
@@ -366,9 +414,14 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
   }
 
   const phaseHint =
-    phase === 'searching' ? '正在联网搜索…'
-      : phase === 'generating' ? '正在生成图谱…'
-        : busy ? '首次生成通常 10~30 秒…' : ''
+    phase === 'classifying' ? '正在理解你的意思…'
+      : phase === 'searching' ? '正在联网搜索…'
+        : phase === 'generating' ? '正在生成回复…'
+          : busy ? '首次生成通常 10~30 秒…' : ''
+
+  const suggestionChips = (session.suggestions?.length
+    ? session.suggestions
+    : session.memory?.pendingClarify?.options) ?? []
 
   const sceneTab = (id: Scene, label: string, disabled?: boolean) => (
     <button
@@ -431,21 +484,47 @@ export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = nul
         </div>
       )}
 
+      {scene !== 'research' && session.memory?.pendingClarify?.summary && (
+        <p className="rounded-md border border-border bg-secondary/40 px-2 py-1.5 text-xs text-muted-foreground">
+          待确认：{session.memory.pendingClarify.summary.slice(0, 120)}
+          {session.memory.pendingClarify.summary.length > 120 ? '…' : ''}
+        </p>
+      )}
+
       {scene !== 'research' && session.messages.length > 0 && (
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-background p-2">
-          {session.messages.map((m, i) => (
-            <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-              <p
-                className={`max-w-[92%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs ${
-                  m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-foreground'
-                }`}
-              >
-                {m.content}
-              </p>
-            </div>
-          ))}
+          {session.messages.map((m, i) => {
+            const tag = m.role === 'assistant' ? intentLabel(assistantIntents[i] ?? (i === session.messages.length - 1 ? session.lastIntent : undefined)) : ''
+            return (
+              <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex flex-col items-start gap-0.5'}>
+                {tag ? <span className="text-[10px] text-muted-foreground">{tag}</span> : null}
+                <p
+                  className={`max-w-[92%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs ${
+                    m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-foreground'
+                  }`}
+                >
+                  {m.content}
+                </p>
+              </div>
+            )
+          })}
           {busy && <p className="text-xs text-muted-foreground">{phaseHint || '正在思考…'}</p>}
           <div ref={chatEndRef} />
+        </div>
+      )}
+
+      {scene !== 'research' && !busy && suggestionChips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {suggestionChips.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              onClick={() => void sendText(s)}
+            >
+              {s}
+            </button>
+          ))}
         </div>
       )}
 

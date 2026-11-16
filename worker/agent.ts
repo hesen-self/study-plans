@@ -40,6 +40,16 @@ export type GraphDraftResult = {
   reply: string
   sources?: WebSearchItem[]
   searchConfigured?: boolean
+  intent?: 'consult' | 'clarify' | 'revise' | 'build'
+  suggestions?: string[]
+}
+
+/** 修订时由上层注入的对话/记忆上下文（避免循环依赖，不用完整 TurnContext 类型） */
+export type ReviseTurnHints = {
+  historyExcerpt?: string
+  memoryBlock?: string
+  /** 确认 pendingClarify 时合成的强制指令 */
+  forcedInstruction?: string
 }
 
 /** 局部修订操作（优先于整图重写） */
@@ -592,7 +602,7 @@ function draftCacheKey(uid: string, topic: string, anchorId?: string): string {
   return a ? `agent:draft:${uid}:${a}:${t}` : `agent:draft:${uid}:${t}`
 }
 
-function formatAnchorHint(anchor?: GraphDraftAnchor | null): string {
+export function formatAnchorHint(anchor?: GraphDraftAnchor | null): string {
   if (!anchor?.nodeId || !anchor.nodeName) return ''
   const domainLine = anchor.domain ? `\n- 锚定领域：${anchor.domain}` : ''
   if (anchor.mode === 'extend') {
@@ -644,7 +654,7 @@ async function chatJsonWithRetry(
 }
 
 /** 压缩草稿进 prompt，降低多轮修订时输出截断概率 */
-function compactDraftForPrompt(draft: GraphDraft): string {
+export function compactDraftForPrompt(draft: GraphDraft): string {
   const nodes = draft.nodes.slice(0, MAX_DRAFT_NODES).map((n) => ({
     id: n.id,
     name: n.name,
@@ -693,6 +703,7 @@ export async function buildGraphDraft(
     skipCache?: boolean
     onPhase?: (phase: 'searching' | 'generating') => void
     anchor?: GraphDraftAnchor | null
+    memoryBlock?: string
   } = {}
 ): Promise<GraphDraftResult> {
   const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
@@ -745,9 +756,14 @@ export async function buildGraphDraft(
     ? `节点之间用边连接：prerequisite / related / extend。至少一半新节点应通过边连接到锚定节点 id=\`${anchor!.nodeId}\`（允许边的一端是该已有 id）。`
     : '节点之间用边连接：prerequisite（前置）、related（相关）、extend（扩展）。必须至少有一条完整的 prerequisite 依赖链（覆盖半数以上节点），不要全是 related。边的端点必须是本次 nodes 里的 id。'
 
+  const memoryHint = opts.memoryBlock?.trim()
+    ? `\n${opts.memoryBlock.trim()}\n请在规划时遵守上述长期偏好。\n`
+    : ''
+
   const prompt = `你是一名学习路线规划专家。请根据主题「${topic}」构建一份待用户确认的知识图谱草稿。
 ${offlineHint}
 ${formatAnchorHint(anchor)}
+${memoryHint}
 ${searchText ? `以下是联网搜索到的相关背景信息，供你参考：\n${searchText}\n` : ''}
 ${existingHint}
 要求：
@@ -775,6 +791,7 @@ ${isExtend ? `6. 不要把锚定节点「${anchor!.nodeName}」再次放进 node
       : `已生成 ${draft.nodes.length} 个知识点、${draft.edges.length} 条依赖关系。先看看预览，不满意就直接告诉我怎么改。`,
     sources: searchHits,
     searchConfigured: configured,
+    intent: 'build',
   }
 
   if (opts.uid && env.STATS_KV) {
@@ -789,20 +806,9 @@ ${isExtend ? `6. 不要把锚定节点「${anchor!.nodeName}」再次放进 node
   return result
 }
 
-function summarizeIntent(messages: ChatTurn[]): string {
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
-  const prev = messages
-    .filter((m) => m.role === 'user')
-    .slice(-3, -1)
-    .map((m) => m.content.slice(0, 80))
-  return [
-    prev.length ? `此前用户诉求摘要：${prev.join('；')}` : '',
-    `最新意见：${lastUser.slice(0, 1000)}`,
-  ].filter(Boolean).join('\n')
-}
-
 /**
  * 多轮对话修订：优先产出 ops 局部合并；失败则回退整图重写。
+ * hints 注入长期偏好与对话摘录，替代旧的 summarizeIntent 薄摘要。
  */
 export async function reviseGraphDraft(
   env: EnvWithSearch,
@@ -810,13 +816,18 @@ export async function reviseGraphDraft(
   messages: ChatTurn[],
   existingNames: string[] = [],
   domains: DomainInfo[] = DEFAULT_DOMAIN_LIST,
-  anchor?: GraphDraftAnchor | null
+  anchor?: GraphDraftAnchor | null,
+  hints?: ReviseTurnHints | null
 ): Promise<GraphDraftResult> {
   const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
   const allowed = domainIds(domainList)
   const fb = fallbackDomainId(domainList)
-  const intent = summarizeIntent(messages)
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const lastUser = hints?.forcedInstruction?.trim()
+    || [...messages].reverse().find((m) => m.role === 'user')?.content
+    || ''
+  const historyExcerpt = hints?.historyExcerpt?.trim()
+    || messages.slice(-6).map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.content.slice(0, 200)}`).join('\n')
+  const memoryBlock = hints?.memoryBlock?.trim() || ''
   const keepIds = anchor?.mode === 'extend' && anchor.nodeId
     ? new Set([anchor.nodeId])
     : new Set<string>()
@@ -829,6 +840,11 @@ export async function reviseGraphDraft(
     : ''
 
   const system = '你是学习路线规划专家。只输出一个 JSON 对象，不要 markdown，不要解释。'
+  const contextBlock = [
+    memoryBlock,
+    historyExcerpt ? `【最近对话摘录】\n${historyExcerpt}` : '',
+    `【最新改稿指令】\n${lastUser.slice(0, 1000)}`,
+  ].filter(Boolean).join('\n\n')
 
   // 第一轮：优先局部 ops（输出短，不易截断）
   const opsPrompt = `按用户意见修订知识图谱草稿。优先输出局部 ops；改动很大时再给完整 nodes+edges。
@@ -838,14 +854,14 @@ ${draftJson}
 
 【已有知识点（避免重复）】${namesHint}
 ${formatAnchorHint(anchor)}
-【变更意图】
-${intent}
+${contextBlock}
 
 要求：
 1. domain 只能是：${allowed.join(' / ')}
 2. 边类型：prerequisite / related / extend；端点优先草稿节点 id${edgeHint}
-3. reply 一句中文简述改动
-4. JSON 二选一：
+3. 遵守用户长期偏好与会话偏好
+4. reply 一句中文简述改动
+5. JSON 二选一：
 {"reply":"...","ops":[{"op":"add_node","node":{"id":"...","name":"...","domain":"...","level":1,"tags":[]}}]}
 {"reply":"...","nodes":[...],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
 
@@ -860,22 +876,22 @@ ${intent}
   if (!next) {
     console.error('reviseGraphDraft: ops/parse failed, fallback to full rewrite', {
       hasParsed: !!parsed,
-      intent: intent.slice(0, 120),
+      instruction: lastUser.slice(0, 120),
     })
     const rewritePrompt = `用户要求修改学习图谱。请输出修订后的完整图谱 JSON（不要 ops）。
 
 【当前草稿】
 ${draftJson}
 
-【变更意图】
-${intent}
+${contextBlock}
 ${formatAnchorHint(anchor)}
 
 要求：
 1. 保留仍合理的节点，按意见增删改
 2. domain 只能是：${allowed.join(' / ')}
 3. 边类型 prerequisite/related/extend；端点须有效${edgeHint}
-4. 输出：{"reply":"一句中文","nodes":[{"id":"...","name":"...","domain":"...","level":1,"tags":[]}],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
+4. 遵守用户长期偏好
+5. 输出：{"reply":"一句中文","nodes":[{"id":"...","name":"...","domain":"...","level":1,"tags":[]}],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
 
     parsed = await chatJsonWithRetry(env, [
       { role: 'system', content: system },
@@ -889,7 +905,12 @@ ${formatAnchorHint(anchor)}
   }
   const reply = String((parsed as { reply?: unknown } | null)?.reply ?? '').trim().slice(0, 300)
     || `已按「${lastUser.slice(0, 40)}」更新图谱草稿`
-  return { draft: next, reply, searchConfigured: isSearchConfigured(env) }
+  return {
+    draft: next,
+    reply,
+    searchConfigured: isSearchConfigured(env),
+    intent: 'revise',
+  }
 }
 
 /** 从不完整 / 非法 JSON 中尽量抽出字符串字段（模型常在 content 里写裸换行） */

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, Profile } from '@/api'
+import { AgentMemoryProfile, api, Profile } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -30,10 +30,14 @@ export default function ProfileView() {
   const [uploadError, setUploadError] = useState('')
   const [uploadOk, setUploadOk] = useState(false)
   const [localPreview, setLocalPreview] = useState('')
+  const [agentMem, setAgentMem] = useState<AgentMemoryProfile | null>(null)
+  const [clearingMem, setClearingMem] = useState(false)
+  const [memMsg, setMemMsg] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     api.profile().then((p) => setProfile({ ...EMPTY, ...p }))
+    api.agentMemory().then(setAgentMem).catch(() => setAgentMem(null))
   }, [])
 
   useEffect(() => {
@@ -185,6 +189,53 @@ export default function ProfileView() {
           <div className="flex justify-end">
             <Button onClick={() => void save()} disabled={saving || uploading}>{saving ? '保存中…' : '保存'}</Button>
           </div>
+        </div>
+      </Panel>
+
+      <Panel title="AI 助手长期记忆" meta={agentMem ? `${agentMem.episode_count} 条情景` : undefined}>
+        <div className="space-y-3 text-sm">
+          <p className="text-muted-foreground">
+            助手会蒸馏你的学习偏好与建图结论，跨会话提供更准的建议（不保存完整聊天原文）。
+          </p>
+          {agentMem?.goal_summary ? (
+            <p><span className="text-muted-foreground">目标摘要：</span>{agentMem.goal_summary}</p>
+          ) : null}
+          {agentMem?.style ? (
+            <p><span className="text-muted-foreground">风格：</span>{agentMem.style}</p>
+          ) : null}
+          {agentMem?.preferences?.length ? (
+            <p><span className="text-muted-foreground">偏好：</span>{agentMem.preferences.join('；')}</p>
+          ) : (
+            <p className="text-muted-foreground">暂无已记录的偏好，多轮对话后会逐步沉淀。</p>
+          )}
+          {agentMem?.focus_domains?.length ? (
+            <p><span className="text-muted-foreground">关注领域：</span>{agentMem.focus_domains.join('、')}</p>
+          ) : null}
+          {memMsg && <p className="text-muted-foreground">{memMsg}</p>}
+          <Button
+            variant="outline"
+            disabled={clearingMem}
+            onClick={() => {
+              if (!confirm('确认清除助手长期记忆（画像与情景摘要）？当前对话会话不受影响。')) return
+              setClearingMem(true)
+              setMemMsg('')
+              void api.clearAgentMemory()
+                .then(() => {
+                  setAgentMem({
+                    preferences: [],
+                    goal_summary: '',
+                    style: '',
+                    focus_domains: [],
+                    episode_count: 0,
+                  })
+                  setMemMsg('已清除助手长期记忆')
+                })
+                .catch((e) => setMemMsg(e instanceof Error ? e.message : '清除失败'))
+                .finally(() => setClearingMem(false))
+            }}
+          >
+            {clearingMem ? '清除中…' : '清除助手长期记忆'}
+          </Button>
         </div>
       </Panel>
     </div>

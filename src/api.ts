@@ -83,11 +83,29 @@ export interface GraphDraftAnchor {
   mode?: 'build' | 'extend' | 'research'
 }
 
+export type AgentIntent = 'consult' | 'clarify' | 'revise' | 'build'
+
+export type AgentSessionMemory = {
+  pendingClarify?: { summary: string; options: string[]; createdAt: number } | null
+  focusNodeIds?: string[]
+  lastIntent?: Exclude<AgentIntent, 'build'>
+  sessionPreferences?: string[]
+}
+
+export type AgentMemoryProfile = {
+  preferences: string[]
+  goal_summary: string
+  style: string
+  focus_domains: string[]
+  episode_count: number
+}
+
 export type GraphDraftRequest = {
   messages: ChatTurn[]
   draft?: GraphDraft | null
   skipCache?: boolean
   anchor?: GraphDraftAnchor | null
+  memory?: AgentSessionMemory | null
 }
 
 export interface Profile {
@@ -195,6 +213,9 @@ export interface GraphDraftResponse {
   searchConfigured?: boolean
   conflicts?: DraftConflicts
   remaps?: { from: string; to: string }[]
+  intent?: AgentIntent
+  suggestions?: string[]
+  memory?: AgentSessionMemory
 }
 
 export const STATUS_LABEL: Record<string, string> = {
@@ -316,11 +337,15 @@ export const api = {
       method: 'POST', body: JSON.stringify(body),
     }),
 
+  agentMemory: () => req<AgentMemoryProfile>('/api/agent/memory'),
+  clearAgentMemory: () =>
+    req<{ ok: boolean }>('/api/agent/memory', { method: 'DELETE' }),
+
   /** SSE 建图：phase → result / error；支持 AbortSignal */
   graphDraftStream: async (
     body: GraphDraftRequest,
     handlers: {
-      onPhase?: (phase: 'searching' | 'generating') => void
+      onPhase?: (phase: 'searching' | 'generating' | 'classifying') => void
       onResult?: (r: GraphDraftResponse) => void
       onError?: (error: string) => void
     },
@@ -357,7 +382,7 @@ export const api = {
         try {
           const data = JSON.parse(line.slice(5).trim()) as {
             type?: string
-            phase?: 'searching' | 'generating'
+            phase?: 'searching' | 'generating' | 'classifying'
             error?: string
           } & GraphDraftResponse
           if (data.type === 'phase' && data.phase) handlers.onPhase?.(data.phase)

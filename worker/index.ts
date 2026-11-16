@@ -31,6 +31,20 @@ import {
   type GraphDraft,
   type GraphDraftAnchor,
 } from './agent.ts'
+import {
+  buildTurnContext,
+  classifyAgentTurn,
+  clarifyDraft,
+  clearLongTermMemory,
+  consultDraft,
+  distillAfterTurn,
+  loadLongTermMemory,
+  looksLikeConfirm,
+  normalizeSessionMemory,
+  readMemoryForClient,
+  type AgentIntent,
+  type AgentSessionMemory,
+} from './agent-memory.ts'
 import { nextSnowflakeId } from './snowflake.ts'
 import {
   COOKIE_NAME,
@@ -1059,6 +1073,7 @@ type GraphDraftBody = {
   draft?: GraphDraft | null
   skipCache?: boolean
   anchor?: GraphDraftAnchor | null
+  memory?: AgentSessionMemory | null
 }
 
 function normalizeAnchor(raw: GraphDraftBody['anchor']): GraphDraftAnchor | null {
@@ -1073,11 +1088,14 @@ function normalizeAnchor(raw: GraphDraftBody['anchor']): GraphDraftAnchor | null
   return { nodeId, nodeName, domain, mode }
 }
 
+type GraphDraftPhase = 'searching' | 'generating' | 'classifying'
+
 async function runGraphDraft(
   env: Bindings,
   uid: string,
   b: GraphDraftBody,
-  onPhase?: (phase: 'searching' | 'generating') => void
+  onPhase?: (phase: GraphDraftPhase) => void,
+  scheduleDistill?: (task: Promise<unknown>) => void
 ): Promise<{
   draft: GraphDraft
   reply: string
@@ -1085,6 +1103,9 @@ async function runGraphDraft(
   searchConfigured: boolean
   conflicts: ReturnType<typeof previewDraftConflicts>
   remaps: { from: string; to: string }[]
+  intent: AgentIntent
+  suggestions: string[]
+  memory: AgentSessionMemory
 }> {
   const messages = (Array.isArray(b.messages) ? b.messages.slice(-12) : [])
     .filter((m): m is ChatTurn =>
@@ -1113,33 +1134,141 @@ async function runGraphDraft(
     ? new Set([effectiveAnchor.nodeId])
     : new Set<string>()
 
+  const sessionMem = normalizeSessionMemory(b.memory)
+  const longTerm = await loadLongTermMemory(env.DB, uid).catch(() => null)
+  const profile = longTerm?.profile ?? {
+    preferences: [] as string[],
+    avoid: [] as string[],
+    style: '',
+    focus_domains: [] as string[],
+    level_bias: '' as '' | 'beginner' | 'balanced' | 'advanced',
+    notes: '',
+  }
+  const goalSummary = longTerm?.goalSummary ?? ''
+  const goal = longTerm?.goal ?? ''
+  const episodes = longTerm?.episodes ?? []
+
+  const hasDraft = !!(b.draft && Array.isArray(b.draft.nodes) && b.draft.nodes.length)
+  const current = hasDraft
+    ? sanitizeGraphDraft(b.draft, keepIds, allowed, fb)
+    : { nodes: [] as GraphDraft['nodes'], edges: [] as GraphDraft['edges'] }
+
+  const ctx = buildTurnContext({
+    messages,
+    draft: hasDraft ? current : null,
+    session: sessionMem,
+    profile,
+    goal,
+    goalSummary,
+    episodes,
+    anchor: effectiveAnchor,
+  })
+
   let result: {
     draft: GraphDraft
     reply: string
     sources?: { url: string; title: string; description?: string }[]
     searchConfigured?: boolean
+    intent?: AgentIntent
+    suggestions?: string[]
+    memory?: AgentSessionMemory
   }
-  if (b.draft && Array.isArray(b.draft.nodes) && b.draft.nodes.length) {
-    onPhase?.('generating')
-    const current = sanitizeGraphDraft(b.draft, keepIds, allowed, fb)
-    result = await reviseGraphDraft(env, current, messages, existingNames, domains, effectiveAnchor)
-  } else {
+
+  if (!hasDraft) {
     result = await buildGraphDraft(env, lastUser.content.trim(), existingNames, domains, {
       uid,
       skipCache: !!b.skipCache,
       onPhase,
       anchor: effectiveAnchor,
+      memoryBlock: ctx.memoryBlock,
     })
+    result.intent = 'build'
+    result.memory = {
+      ...sessionMem,
+      pendingClarify: null,
+      lastIntent: undefined,
+      sessionPreferences: sessionMem.sessionPreferences,
+    }
+  } else {
+    onPhase?.('classifying')
+    const confirm = looksLikeConfirm(ctx.lastUser, sessionMem)
+    const classified: AgentIntent = confirm ? 'revise' : await classifyAgentTurn(env, ctx)
+
+    if (classified === 'consult') {
+      onPhase?.('generating')
+      result = await consultDraft(env, current, ctx)
+    } else if (classified === 'clarify') {
+      onPhase?.('generating')
+      result = await clarifyDraft(env, current, ctx)
+    } else {
+      onPhase?.('generating')
+      const forced = confirm && sessionMem.pendingClarify
+        ? `请按以下已确认方案修改草稿：${sessionMem.pendingClarify.summary}。用户确认：「${ctx.lastUser}」`
+        : undefined
+      result = await reviseGraphDraft(
+        env, current, messages, existingNames, domains, effectiveAnchor,
+        {
+          historyExcerpt: ctx.historyExcerpt,
+          memoryBlock: ctx.memoryBlock,
+          forcedInstruction: forced,
+        }
+      )
+      const prefs = [...(sessionMem.sessionPreferences ?? [])]
+      if (/实战|项目/.test(ctx.lastUser) && !prefs.includes('偏实战')) prefs.push('偏实战')
+      if (/前置|prerequisite/.test(ctx.lastUser) && !prefs.includes('只要前置链')) prefs.push('只要前置链')
+      result.memory = {
+        ...sessionMem,
+        pendingClarify: null,
+        lastIntent: 'revise',
+        sessionPreferences: prefs.slice(0, 5),
+      }
+      result.intent = 'revise'
+      result.suggestions = []
+    }
   }
-  const meta = sanitizeGraphDraftWithMeta(result.draft, existingIds, allowed, fb)
-  const conflicts = previewDraftConflicts(meta.draft, rows, meta.remaps)
+
+  const intent: AgentIntent = result.intent ?? (hasDraft ? 'revise' : 'build')
+
+  // consult/clarify 不改图：冲突按原草稿算；revise/build 按结果草稿
+  const outDraft = intent === 'consult' || intent === 'clarify' ? current : result.draft
+  const meta = sanitizeGraphDraftWithMeta(
+    intent === 'consult' || intent === 'clarify' ? current : result.draft,
+    existingIds,
+    allowed,
+    fb
+  )
+  const finalDraft = intent === 'consult' || intent === 'clarify' ? current : meta.draft
+  const conflicts = previewDraftConflicts(
+    intent === 'consult' || intent === 'clarify' ? current : meta.draft,
+    rows,
+    intent === 'consult' || intent === 'clarify' ? [] : meta.remaps
+  )
+  const memoryOut = result.memory ?? {
+    ...sessionMem,
+    lastIntent: intent === 'build' ? undefined : intent,
+  }
+
+  const distillPromise = distillAfterTurn(env, uid, {
+    intent,
+    lastUser: lastUser.content.trim(),
+    reply: result.reply,
+    draft: finalDraft.nodes.length ? finalDraft : outDraft,
+    profile,
+    goalSummary,
+    session: memoryOut,
+  })
+  scheduleDistill?.(distillPromise)
+
   return {
-    draft: meta.draft,
+    draft: finalDraft,
     reply: result.reply,
     sources: result.sources ?? [],
     searchConfigured: result.searchConfigured ?? isSearchConfigured(env),
     conflicts,
-    remaps: meta.remaps,
+    remaps: intent === 'consult' || intent === 'clarify' ? [] : meta.remaps,
+    intent,
+    suggestions: result.suggestions ?? [],
+    memory: memoryOut,
   }
 }
 
@@ -1161,9 +1290,13 @@ app.post('/api/agent/graph-draft', async (c) => {
     }
     c.executionCtx.waitUntil((async () => {
       try {
-        const out = await runGraphDraft(c.env, uid, b, async (phase) => {
-          await send({ type: 'phase', phase })
-        })
+        const out = await runGraphDraft(
+          c.env,
+          uid,
+          b,
+          async (phase) => { await send({ type: 'phase', phase }) },
+          (task) => { c.executionCtx.waitUntil(task) }
+        )
         await send({ type: 'result', ...out })
       } catch (e) {
         console.error('graph-draft stream failed', e)
@@ -1181,13 +1314,48 @@ app.post('/api/agent/graph-draft', async (c) => {
   }
 
   try {
-    const out = await runGraphDraft(c.env, uid, b)
+    const out = await runGraphDraft(
+      c.env,
+      uid,
+      b,
+      undefined,
+      (task) => { c.executionCtx.waitUntil(task) }
+    )
     return c.json(out)
   } catch (e) {
     console.error('graph-draft failed', e)
     const msg = e instanceof Error ? e.message : '生成草稿失败'
     const status = msg.includes('请输入') ? 400 : 500
     return c.json({ error: msg }, status)
+  }
+})
+
+// 助手长期记忆（L1 画像只读 + 清除）
+app.get('/api/agent/memory', async (c) => {
+  const uid = c.get('userId')
+  try {
+    const mem = await readMemoryForClient(c.env.DB, uid)
+    return c.json(mem)
+  } catch (e) {
+    console.error('agent memory read failed', e)
+    return c.json({
+      preferences: [],
+      goal_summary: '',
+      style: '',
+      focus_domains: [],
+      episode_count: 0,
+    })
+  }
+})
+
+app.delete('/api/agent/memory', async (c) => {
+  const uid = c.get('userId')
+  try {
+    await clearLongTermMemory(c.env.DB, uid)
+    return c.json({ ok: true })
+  } catch (e) {
+    console.error('agent memory clear failed', e)
+    return c.json({ error: e instanceof Error ? e.message : '清除失败' }, 500)
   }
 })
 
