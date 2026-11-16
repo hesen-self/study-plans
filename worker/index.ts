@@ -673,23 +673,25 @@ app.get('/api/auth/github/callback', async (c) => {
   return c.redirect('/?auth=success', 302)
 })
 
-// 当前登录状态（nickname 供侧栏优先显示，未设置时前端回退邮箱）
+// 当前登录状态（nickname / avatar 供顶栏与侧栏；未设置时前端回退邮箱 / 首字母）
 app.get('/api/auth/me', async (c) => {
   const uid = c.get('userId')
   const email = c.get('email')
   const authenticated = uid !== DEFAULT_USER_ID
   let nickname = ''
+  let avatar = ''
   if (authenticated) {
     try {
-      const row = await c.env.DB.prepare('SELECT nickname FROM users WHERE id = ?')
-        .bind(uid).first<{ nickname: string | null }>()
+      const row = await c.env.DB.prepare('SELECT nickname, avatar, updated_at FROM users WHERE id = ?')
+        .bind(uid).first<{ nickname: string | null; avatar: string | null; updated_at: string | null }>()
       nickname = (row?.nickname ?? '').trim()
+      avatar = toClientAvatar(row?.avatar, row?.updated_at)
     } catch (e) {
-      // 昵称查询失败不能影响登录态判定，降级为显示邮箱
-      console.error('auth/me nickname lookup failed', e)
+      // 资料查询失败不能影响登录态判定，降级为显示邮箱
+      console.error('auth/me profile lookup failed', e)
     }
   }
-  return c.json({ authenticated, user_id: uid, email, nickname })
+  return c.json({ authenticated, user_id: uid, email, nickname, avatar })
 })
 
 // 退出登录

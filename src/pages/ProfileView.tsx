@@ -85,6 +85,8 @@ export default function ProfileView() {
       setUploadOk(true)
       URL.revokeObjectURL(preview)
       setLocalPreview('')
+      // 顶栏头像与昵称同源刷新
+      window.dispatchEvent(new Event('app:profile-updated'))
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : '上传失败')
     } finally {

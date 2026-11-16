@@ -437,7 +437,7 @@ export const api = {
 
   // 认证（应用层自建登录）
   authMe: () =>
-    req<{ authenticated: boolean; user_id: string; email: string; nickname?: string }>('/api/auth/me'),
+    req<{ authenticated: boolean; user_id: string; email: string; nickname?: string; avatar?: string }>('/api/auth/me'),
   sendCode: (email: string) =>
     req<{ ok: boolean }>('/api/auth/send-code', { method: 'POST', body: JSON.stringify({ email }) }),
   verifyCode: (email: string, code: string) =>

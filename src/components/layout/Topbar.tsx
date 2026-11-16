@@ -7,11 +7,12 @@ import { IconChevron, IconLogout, IconSidebar } from './icons'
 type TopbarProps = {
   displayName: string
   email: string
+  avatar?: string
   onToggleRail: () => void
   onLogout: () => void
 }
 
-export default function Topbar({ displayName, email, onToggleRail, onLogout }: TopbarProps) {
+export default function Topbar({ displayName, email, avatar = '', onToggleRail, onLogout }: TopbarProps) {
   const location = useLocation()
   const current = findNavByPath(location.pathname)
   const chipRef = useRef<HTMLButtonElement>(null)
@@ -71,7 +72,13 @@ export default function Topbar({ displayName, email, onToggleRail, onLogout }: T
         aria-expanded={menuOpen}
         onClick={() => (menuOpen ? closeMenu() : openMenu())}
       >
-        <span className="user-avatar">{initial}</span>
+        <span className="user-avatar">
+          {avatar ? (
+            <img src={avatar} alt="" className="user-avatar-img" />
+          ) : (
+            initial
+          )}
+        </span>
         <span className="user-meta">
           <span className="user-name" style={{ display: 'block' }}>
             {displayName}

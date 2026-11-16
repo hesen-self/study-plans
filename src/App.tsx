@@ -14,6 +14,7 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState<'loading' | 'authed' | 'guest'>('loading')
   const [email, setEmail] = useState('')
   const [nickname, setNickname] = useState('')
+  const [avatar, setAvatar] = useState('')
 
   const checkAuth = useCallback(async () => {
     try {
@@ -21,6 +22,7 @@ export default function App() {
       if (me.authenticated) {
         setEmail(me.email)
         setNickname(me.nickname ?? '')
+        setAvatar(me.avatar ?? '')
         setAuthStatus('authed')
       } else {
         setAuthStatus('guest')
@@ -36,22 +38,26 @@ export default function App() {
     checkAuth()
   }, [checkAuth])
 
-  // 资料保存后只刷新昵称：不重判登录态，网络抖动时也不会把用户踢回登录页
+  // 资料保存后只刷新昵称/头像：不重判登录态，网络抖动时也不会把用户踢回登录页
   const refreshIdentity = useCallback(async () => {
     try {
       const me = await api.authMe()
-      if (me.authenticated) setNickname(me.nickname ?? '')
+      if (me.authenticated) {
+        setNickname(me.nickname ?? '')
+        setAvatar(me.avatar ?? '')
+      }
     } catch {
-      // 保留当前昵称与登录态
+      // 保留当前昵称、头像与登录态
     }
   }, [])
 
-  // 任意 API 返回 401（会话过期）时统一回到登录页；资料页保存昵称后立即刷新侧栏显示
+  // 任意 API 返回 401（会话过期）时统一回到登录页；资料页保存后立即刷新顶栏显示
   useEffect(() => {
     const onUnauthorized = () => {
       setAuthStatus('guest')
       setEmail('')
       setNickname('')
+      setAvatar('')
     }
     const onProfileUpdated = () => {
       void refreshIdentity()
@@ -71,6 +77,7 @@ export default function App() {
       setAuthStatus('guest')
       setEmail('')
       setNickname('')
+      setAvatar('')
     }
   }
 
@@ -87,7 +94,7 @@ export default function App() {
   }
 
   return (
-    <AppShell email={email} nickname={nickname} onLogout={() => void logout()}>
+    <AppShell email={email} nickname={nickname} avatar={avatar} onLogout={() => void logout()}>
       <Routes>
         <Route path="/" element={<Navigate to="/graph" replace />} />
         <Route path="/graph" element={<GraphView />} />

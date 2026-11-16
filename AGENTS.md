@@ -8,13 +8,13 @@
 
 | Agent | 职能 | 负责范围 | 使用 Skill |
 |-------|------|----------|-----------|
-| **ui-builder** | 前端 UI 开发 | `src/**/*.tsx`、`src/styles.css` | `ui-style` |
+| **ui-builder** | 前端 UI 开发 | `src/**/*.tsx`、`src/globals.css`、`src/styles/**` | `ui-style` |
 | **api-builder** | 后端接口开发 | `worker/index.ts`、`migrations/`、`seed/` | `api-design` |
 | **code-reviewer** | 代码检查与增强 | 全部代码 | `eslint-check` |
 
 ### 职能边界
 
-- **ui-builder**：只写 UI，不碰 worker / SQL。样式必须遵守第二节规则。
+- **ui-builder**：只写 UI，不碰 worker / SQL。样式与版面必须遵守第二节「珍珠玻璃」规则。
 - **api-builder**：只写 Hono 路由、D1 迁移与种子数据，不写 React 组件。
 - **code-reviewer**：只读 + 运行检查，不直接改业务代码；发现问题输出报告，由对应 builder 修复。
 
@@ -26,50 +26,134 @@
 
 ---
 
-## 二、Skill: ui-style（UI 样式规则）
+## 二、Skill: ui-style（珍珠玻璃 UI 统一规则）⚠️ 必读
 
-### 组件优先级
+本项目登录后控制台采用 **珍珠玻璃（Pearl Glass）** 视觉语言：冷灰绿舞台、深色厚边圆角外框、克制玻璃材质、蓝主操作 / 青柠状态点。技术栈仍是 **React + Tailwind + shadcn 语义 token**，外壳与材质用 CSS 变量 + `pearl-shell.css`，**禁止**另起一套暖奶油主题、扁平侧栏或仪表盘式散乱卡片堆叠。
 
-1. 优先使用 `@/components/ui/` 下已有的 shadcn 组件。
-2. 缺少组件时，先运行：
+### 2.1 文件与职责
+
+| 路径 | 职责 |
+|------|------|
+| `src/globals.css` | shadcn HSL 语义色 + 珍珠玻璃令牌（`--stage` / `--frame` / `--ink*` / `--blue` / `--lime` 等） |
+| `src/styles/pearl-shell.css` | 外壳、材质、侧栏、顶栏、`.page` / `.page-head` / `.panel` |
+| `src/components/layout/AppShell.tsx` | `.stage` → `.app-frame` → Sidebar + Topbar + 内容区 |
+| `src/components/layout/Sidebar.tsx` | 导航轨、分组、滑动 `nav-thumb` |
+| `src/components/layout/Topbar.tsx` | 折叠、面包屑、用户菜单 |
+| `src/components/ui/page-header.tsx` | 页头：大标题 + 说明 + 右侧操作 |
+| `src/components/ui/panel.tsx` | 阅读面面板：`m-surface` + 可选标题/工具栏 |
+
+- 登录态页面必须包在 `AppShell` 内；`App.tsx` 只保留鉴权与路由，**禁止**再内联一套侧栏。
+- 未登录页（`LoginView`）在壳外；本规范不强制登录页做成神经网络舞台，但颜色仍用语义 token。
+
+### 2.2 外壳版面（不可退回扁平侧栏）
+
+结构固定为：
+
+```
+.stage                    // 灰绿舞台 + 8px 边距
+  .app-frame              // 深色 10px 厚边、radius 38px
+    aside.rail.m-rail     // 侧栏轨（--rail-w: 232px，折叠 76px）
+    .workspace
+      header.topbar       // 64px；内容滚动后 is-scrolled 凝结
+      main.content
+        .page             // 页内边距 26/28/40；窄屏 18/16/32
+```
+
+规则：
+
+- **禁止**用 `flex h-screen` + 单列 `aside border-r` 替代珍珠玻璃外壳。
+- 侧栏导航必须分组（如「学习」「管理」），选中态用滑动 `.nav-thumb.m-pill`，不要只靠 `bg-secondary`。
+- 当前位置由顶栏面包屑承担；页头只写中文大标题，**不加**英文 eyebrow / `01 / 02` 编号。
+- 窄屏（`≤820px`）：外框去边、侧栏改抽屉 + `.rail-scrim`；折叠偏好键 `study.railCollapsed`。
+- 图谱等全幅画布高度使用 `.graph-canvas-h`（已扣 stage / frame / topbar / page 开销），禁止写死旧的 `100vh-110px`。
+
+### 2.3 页面骨架（新页默认节奏）
+
+业务页统一：
+
+```tsx
+<div className="stack">
+  <PageHeader title="中文标题" desc="一句说明">
+    {/* 可选：主操作 / 筛选 */}
+  </PageHeader>
+  <Panel title="区块名" meta="可选元信息" tools={/* 可选工具 */}>
+    {/* 内容 */}
+  </Panel>
+</div>
+```
+
+| 场景 | 用法 |
+|------|------|
+| 列表 / 表单 / 统计区块 | `Panel`（`m-surface`） |
+| 指标小卡 | `Panel flush` + 内边距内容 |
+| 图谱画布 | `Panel flush` + `.graph-canvas-h` |
+| 多区块纵向间距 | 外层 `stack`（gap 16） |
+
+- **禁止**新页再用裸 `h1.text-2xl` + `rounded-lg border bg-card` 手写页头/卡片，除非在壳外的登录页。
+- 改已有页时优先迁到 `PageHeader` / `Panel`，不要平行维护两套版面。
+
+### 2.4 组件优先级
+
+1. 优先使用 `@/components/ui/` 下已有组件（含 `PageHeader`、`Panel`、Button、Input 等）。
+2. 缺少 shadcn 原子组件时，先运行：
    ```bash
    npx shadcn@latest add <组件名>
    ```
-3. 不要手写已存在 shadcn 组件的重复实现。
+3. 不要手写已存在组件的重复实现。
+4. 外壳 / 材质类（`.stage`、`.m-pill`、`.m-surface` 等）只放在 `pearl-shell.css`，页面用 class，不复制阴影/渐变配方。
 
-### 颜色（仅语义化 Token）
+### 2.5 颜色与令牌
 
-只允许使用语义化 Token 类：
+页面与组件只引用语义 token / 珍珠变量，不手写调色板：
 
-- `bg-background` / `text-foreground`
-- `text-muted-foreground`
-- `border-border`
-- `bg-primary` / `text-primary-foreground`
+| 用途 | 用法 |
+|------|------|
+| 页面底 / 正文 | `bg-background` / `text-foreground`（映射 canvas / ink） |
+| 次级文字 | `text-muted-foreground` 或 `var(--ink-muted)` |
+| 主操作 / 选中 | `bg-primary` / `text-primary`（蓝 `#236de9`） |
+| 边框 | `border-border` 或 `var(--line-strong)` |
+| 阅读面 | `Panel` / `.m-surface`（不要叠多层自定义阴影） |
+| 正常 / 能力点缀 | `var(--lime)`（仅状态点、section-label 前置点等） |
+| 危险 | `text-destructive` / `var(--red-text)` |
 
 禁止：
 
 - Tailwind 调色板类（`bg-blue-500`、`text-red-600` 等）
-- 任意颜色值（`bg-[#1a1a1a]` 等）
+- 任意颜色值（`bg-[#1a1a1a]` 等），**例外**：领域色等业务数据驱动的 `style={{ backgroundColor: domain.color }}`
+- 重新引入暖奶油背景（旧 `--background: 40 33% 97%`）或紫色霓虹主题
 
-### 间距
+改主题时只改 `globals.css` 令牌；勿在业务组件里硬编码色值覆盖壳层。
 
-- 只使用 Tailwind 标准刻度：`p-4`、`gap-6`、`space-y-2` 等。
-- 禁止任意值：`p-[13px]`、`gap-[7px]` 等。
+### 2.6 间距与圆角
 
-### 字体层级
+- Tailwind 标准刻度：`p-4`、`gap-6`、`space-y-2` 等；禁止 `p-[13px]`、`gap-[7px]`。
+- 壳层尺寸用 CSS 变量：`--rail-w`、`--topbar-h`、`--r-xs`…`--r-xl`；不要在 JSX 里写 `w-[180px]` 侧栏。
+- 面板圆角用 `.panel`（`--r-lg`），不要另写 `rounded-xl` 一套。
 
-| 层级 | 类名 |
+### 2.7 字体层级
+
+| 层级 | 用法 |
 |------|------|
-| 页面标题 | `text-2xl font-semibold tracking-tight` |
-| 区块标题 | `text-lg font-medium` |
+| 页面标题 | `PageHeader` → `.page-title`（约 28px / 740） |
+| 面板 / 区块标题 | `Panel` 的 `title` → `.section-label`（青柠前置点） |
 | 正文 | `text-sm` |
-| 辅助文字 | `text-sm text-muted-foreground` |
+| 辅助 / 元信息 | `text-sm text-muted-foreground` 或 `.panel-meta` / `.page-desc` |
+| 等宽 | 仅数字、编码、领域 id、时间 |
 
-### 交互状态
+### 2.8 交互状态
 
 - 所有交互元素必须有 hover / focus / disabled 状态。
 - 使用 shadcn 组件自带的 `variant`、`size` 属性控制样式。
-- 禁止手写 `hover:bg-xxx` 等状态类覆盖组件变体。
+- 禁止手写 `hover:bg-xxx` 等状态类覆盖组件变体；壳层按钮用 `.shell-icon-btn` / `.nav-item` 既有状态。
+
+### 2.9 明确不做（避免范围膨胀）
+
+除非需求单独立项，否则 **不要**往本项目塞：
+
+- Vue / GSAP / ⌘K 命令面板 / 外观密度对话框
+- 仪器化读数层、神经网络登录、看板/矩阵等 scaffold 重型版式
+
+借的是壳层构图、材质与 `PageHeader`→`Panel` 节奏，不是整库搬迁。
 
 ---
 

@@ -9,11 +9,12 @@ const RAIL_KEY = 'study.railCollapsed'
 type AppShellProps = {
   email: string
   nickname: string
+  avatar?: string
   onLogout: () => void
   children: ReactNode
 }
 
-export default function AppShell({ email, nickname, onLogout, children }: AppShellProps) {
+export default function AppShell({ email, nickname, avatar = '', onLogout, children }: AppShellProps) {
   const location = useLocation()
   const displayName = nickname.trim() || email
   const [railCollapsed, setRailCollapsed] = useState(() => {
@@ -74,6 +75,7 @@ export default function AppShell({ email, nickname, onLogout, children }: AppShe
           <Topbar
             displayName={displayName}
             email={email}
+            avatar={avatar}
             onToggleRail={toggleRail}
             onLogout={onLogout}
           />
