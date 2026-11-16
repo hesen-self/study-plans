@@ -76,6 +76,8 @@ export default function GraphView() {
   // 关键词输入与生效值分离：输入去抖 300ms，避免每敲一个字都销毁重建整图
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
+  const [searchMode, setSearchMode] = useState<'keyword' | 'semantic'>('keyword')
+  const [legendOpen, setLegendOpen] = useState(false)
   const [viewMode, setViewMode] = useState<'graph' | 'list'>('graph')
   const [selected, setSelected] = useState<string | null>(null)
   const [semanticQ, setSemanticQ] = useState('')
@@ -144,7 +146,8 @@ export default function GraphView() {
   }, [])
 
   const filtered = useMemo(() => {
-    const kw = keyword.trim().toLowerCase()
+    // 语义模式下不套用关键词过滤，避免双条件打架
+    const kw = searchMode === 'keyword' ? keyword.trim().toLowerCase() : ''
     const ns = nodes.filter((n) =>
       (!domainFilter || n.domain === domainFilter) &&
       (!statusFilter || n.status === statusFilter) &&
@@ -152,7 +155,7 @@ export default function GraphView() {
     )
     const ids = new Set(ns.map((n) => n.id))
     return { nodes: ns, edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)) }
-  }, [nodes, edges, domainFilter, statusFilter, keyword])
+  }, [nodes, edges, domainFilter, statusFilter, keyword, searchMode])
 
   const buildData = useCallback((ns: Node[], es: Edge[]): GraphData => {
     // 孤立节点（无任何连线）不继承坐标：它们没有连线约束，
@@ -417,9 +420,26 @@ export default function GraphView() {
     if (selected) void graphRef.current?.focusElement(selected)
   }
 
+  const switchSearchMode = (mode: 'keyword' | 'semantic') => {
+    setSearchMode(mode)
+    setSemanticRes(null)
+  }
+
   return (
     <div className="relative stack">
       <PageHeader title="知识图谱" desc="筛选、搜索并编辑知识点与依赖关系。">
+        <Button onClick={openNewNode}>新建节点</Button>
+        <Button variant="outline" onClick={() => setShowEdgeEditor(true)}>新建连线</Button>
+        <Button variant="secondary" onClick={() => setShowAgent((v) => !v)}>AI 助手</Button>
+        <Button
+          variant="outline"
+          onClick={() => setViewMode((v) => (v === 'graph' ? 'list' : 'graph'))}
+        >
+          {viewMode === 'graph' ? '列表视图' : '图谱视图'}
+        </Button>
+      </PageHeader>
+
+      <div className="flex flex-wrap items-center gap-2">
         <Select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} className="w-36">
           <option value="">全部领域</option>
           {domains.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
@@ -430,48 +450,79 @@ export default function GraphView() {
           <option value="learning">学习中</option>
           <option value="done">已掌握</option>
         </Select>
-        <Input
-          placeholder="搜索知识点…"
-          value={keywordInput}
-          onChange={(e) => setKeywordInput(e.target.value)}
-          className="w-44"
-        />
-        <Input
-          placeholder="语义搜索（AI）…"
-          value={semanticQ}
-          onChange={(e) => setSemanticQ(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && doSemanticSearch()}
-          className="w-52"
-        />
-        <Button onClick={doSemanticSearch}>语义搜索</Button>
-        <Button variant="secondary" onClick={() => setShowAgent((v) => !v)}>AI 助手</Button>
-        <Button variant="outline" size="sm" onClick={openNewNode}>新建节点</Button>
-        <Button variant="outline" size="sm" onClick={() => setShowEdgeEditor(true)}>新建连线</Button>
-        <Button variant="outline" size="sm" disabled={!selected} onClick={openEdit}>编辑</Button>
-        <Button variant="destructive" size="sm" disabled={!selected} onClick={removeNode}>删除</Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setViewMode((v) => (v === 'graph' ? 'list' : 'graph'))}
-        >
-          {viewMode === 'graph' ? '列表视图' : '图谱视图'}
-        </Button>
-      </PageHeader>
 
-      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-        {domains.map((d) => (
-          <span key={d.id} className="flex items-center">
-            <span
-              className="mr-1 inline-block h-2.5 w-2.5 rounded-full"
-              style={{ backgroundColor: d.color }}
-            />
-            {d.name}
-          </span>
-        ))}
+        <div className="flex min-w-[240px] flex-1 items-center gap-1 rounded-md border border-border bg-card p-1">
+          <div className="flex shrink-0 rounded-md bg-secondary p-0.5" role="group" aria-label="搜索模式">
+            <Button
+              type="button"
+              size="sm"
+              variant={searchMode === 'keyword' ? 'default' : 'ghost'}
+              className="h-7 px-2 text-xs"
+              onClick={() => switchSearchMode('keyword')}
+            >
+              关键词
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={searchMode === 'semantic' ? 'default' : 'ghost'}
+              className="h-7 px-2 text-xs"
+              onClick={() => switchSearchMode('semantic')}
+            >
+              语义
+            </Button>
+          </div>
+          <Input
+            placeholder={searchMode === 'keyword' ? '搜索知识点…' : '语义搜索（AI）…'}
+            value={searchMode === 'keyword' ? keywordInput : semanticQ}
+            onChange={(e) => {
+              if (searchMode === 'keyword') setKeywordInput(e.target.value)
+              else setSemanticQ(e.target.value)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && searchMode === 'semantic') void doSemanticSearch()
+            }}
+            className="h-8 min-w-0 flex-1 border-0 shadow-none focus-visible:ring-0"
+            aria-label={searchMode === 'keyword' ? '关键词搜索' : '语义搜索'}
+          />
+          {searchMode === 'semantic' && (
+            <Button type="button" size="sm" className="h-7 shrink-0" onClick={() => void doSemanticSearch()}>
+              搜索
+            </Button>
+          )}
+        </div>
+
+        <div className="relative">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-expanded={legendOpen}
+            onClick={() => setLegendOpen((v) => !v)}
+          >
+            图例
+          </Button>
+          {legendOpen && (
+            <div className="absolute right-0 top-full z-[6] mt-1 min-w-[140px] rounded-lg border border-border bg-card p-3 shadow-sm">
+              <div className="flex flex-col gap-2 text-xs text-muted-foreground">
+                {domains.map((d) => (
+                  <span key={d.id} className="flex items-center">
+                    <span
+                      className="mr-2 inline-block h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: d.color }}
+                    />
+                    {d.name}
+                  </span>
+                ))}
+                {domains.length === 0 && <span>暂无领域</span>}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {semanticRes && (
-        <div className="absolute left-[220px] top-16 z-[5] w-[360px] max-h-80 overflow-y-auto rounded-lg border border-border bg-card p-2 shadow-sm">
+        <div className="absolute left-8 top-36 z-[5] w-[360px] max-h-80 overflow-y-auto rounded-lg border border-border bg-card p-2 shadow-sm">
           <div className="flex items-center justify-between px-2 pb-1">
             <span className="text-sm font-medium">语义搜索结果</span>
             <Button variant="ghost" size="sm" onClick={() => setSemanticRes(null)}>关闭</Button>
@@ -585,6 +636,8 @@ export default function GraphView() {
           node={nodes.find((n) => n.id === selected) ?? null}
           onClose={() => { drawerDismissedRef.current = true; setSelected(null) }}
           onChanged={load}
+          onEdit={openEdit}
+          onDelete={() => void removeNode()}
         />
       )}
 

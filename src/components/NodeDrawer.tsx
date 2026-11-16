@@ -14,9 +14,11 @@ interface Props {
   node: Node | null
   onClose: () => void
   onChanged: () => void
+  onEdit?: () => void
+  onDelete?: () => void
 }
 
-export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) {
+export default function NodeDrawer({ nodeId, node, onClose, onChanged, onEdit, onDelete }: Props) {
   const navigate = useNavigate()
   const [note, setNote] = useState('')
   const [editingNote, setEditingNote] = useState(false)
@@ -92,22 +94,40 @@ export default function NodeDrawer({ nodeId, node, onClose, onChanged }: Props) 
     <>
       <div className="fixed inset-0 z-10 bg-black/25" onClick={onClose} />
       <div className="fixed inset-y-0 right-0 z-[11] w-[440px] max-w-[90vw] overflow-y-auto border-l border-border bg-card p-5 shadow-lg">
-        <h2 className="text-2xl font-semibold tracking-tight">{node.name}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {DOMAIN_LABEL[node.domain]} · {['', '入门', '进阶', '高级'][node.level]} · {node.id}
-        </p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-2xl font-semibold tracking-tight">{node.name}</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {DOMAIN_LABEL[node.domain]} · {['', '入门', '进阶', '高级'][node.level]} · {node.id}
+            </p>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="关闭">
+            关闭
+          </Button>
+        </div>
         <div className="mt-2 flex flex-wrap gap-1">
           {tags.map((t) => <Badge key={t} variant="secondary">{t}</Badge>)}
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-4 w-full"
-          onClick={() => navigate(`/knowledge?node=${encodeURIComponent(nodeId)}`)}
-        >
-          查看知识库明细
-        </Button>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {onEdit && (
+            <Button variant="outline" size="sm" onClick={onEdit}>
+              编辑节点
+            </Button>
+          )}
+          {onDelete && (
+            <Button variant="destructive" size="sm" onClick={onDelete}>
+              删除节点
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate(`/knowledge?node=${encodeURIComponent(nodeId)}`)}
+          >
+            查看知识库
+          </Button>
+        </div>
 
         <section className="mt-5">
           <h3 className="text-lg font-medium">学习状态</h3>
