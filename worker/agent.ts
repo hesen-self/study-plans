@@ -165,6 +165,18 @@ export async function webSearchTopic(env: EnvWithSearch, topic: string): Promise
   return out
 }
 
+function unwrapAiResponse(res: unknown): string {
+  if (typeof res === 'string') return res
+  if (!res || typeof res !== 'object') return ''
+  const r = (res as { response?: unknown }).response
+  if (typeof r === 'string') return r
+  // JSON Mode 可能直接返回对象
+  if (r && typeof r === 'object') {
+    try { return JSON.stringify(r) } catch { return '' }
+  }
+  return ''
+}
+
 // 调用聊天模型，返回文本
 export async function chat(
   env: EnvWithSearch,
@@ -178,11 +190,40 @@ export async function chat(
     max_tokens: maxTokens,
     temperature: 0.2,
   }) as unknown
-  if (typeof res === 'string') return res
-  if (res && typeof res === 'object' && typeof (res as { response?: unknown }).response === 'string') {
-    return (res as { response: string }).response
+  return unwrapAiResponse(res)
+}
+
+/**
+ * 强制 JSON 对象输出（Workers AI JSON Mode）。
+ * 失败时回退到普通 chat + extractJson。
+ */
+export async function chatJson(
+  env: EnvWithSearch,
+  messages: { role: string; content: string }[],
+  maxTokens = 2000,
+  model: string = CHAT_MODEL
+): Promise<unknown | null> {
+  try {
+    const res = await env.AI.run(model as '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.15,
+      response_format: { type: 'json_object' },
+    }) as unknown
+    if (res && typeof res === 'object') {
+      const r = (res as { response?: unknown }).response
+      if (r && typeof r === 'object') return r
+      if (typeof r === 'string') {
+        const parsed = extractJson(r)
+        if (parsed) return parsed
+      }
+    }
+    if (typeof res === 'string') return extractJson(res)
+  } catch (e) {
+    console.error('chatJson JSON Mode failed, fallback to text', e)
   }
-  return ''
+  const raw = await chat(env, messages, maxTokens, model)
+  return extractJson(raw)
 }
 
 /**
@@ -259,26 +300,63 @@ export function sseData(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`
 }
 
+/** 补全截断 JSON：闭合未结束字符串与括号 */
+export function repairTruncatedJson(s: string): string {
+  let inString = false
+  let escape = false
+  const stack: string[] = []
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (inString) {
+      if (escape) { escape = false; continue }
+      if (ch === '\\') { escape = true; continue }
+      if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') { inString = true; continue }
+    if (ch === '{') stack.push('}')
+    else if (ch === '[') stack.push(']')
+    else if ((ch === '}' || ch === ']') && stack.length && stack[stack.length - 1] === ch) {
+      stack.pop()
+    }
+  }
+  let out = s
+  if (inString) out += '"'
+  out = out.replace(/,\s*$/, '')
+  // 裸 key 后截断：`"foo":` → 补 null
+  if (/:\s*$/.test(out)) out += 'null'
+  while (stack.length) out += stack.pop()
+  return out
+}
+
 // 从 LLM 文本中稳健地提取 JSON（去掉 ```json 围栏等）
 export function extractJson(text: string): unknown | null {
   if (typeof text !== 'string') return null
   const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim()
   const start = cleaned.indexOf('{')
+  if (start === -1) return null
   const end = cleaned.lastIndexOf('}')
-  if (start === -1 || end === -1 || end <= start) return null
-  const candidate = cleaned.slice(start, end + 1)
-  try {
-    return JSON.parse(candidate)
-  } catch {
-    try {
-      const fixed = candidate
-        .replace(/,\s*}/g, '}')
-        .replace(/,\s*\]/g, ']')
-      return JSON.parse(fixed)
-    } catch {
-      return null
+  const candidates = [
+    end > start ? cleaned.slice(start, end + 1) : cleaned.slice(start),
+  ]
+  // 若没有闭合 }，仍尝试修复截断体
+  if (end <= start) candidates.push(cleaned.slice(start))
+
+  for (const candidate of candidates) {
+    const variants = [
+      candidate,
+      candidate.replace(/,\s*}/g, '}').replace(/,\s*\]/g, ']'),
+      repairTruncatedJson(candidate.replace(/,\s*}/g, '}').replace(/,\s*\]/g, ']')),
+    ]
+    for (const v of variants) {
+      try {
+        return JSON.parse(v)
+      } catch {
+        /* try next */
+      }
     }
   }
+  return null
 }
 
 function slugify(s: string): string {
@@ -539,9 +617,17 @@ async function chatJsonWithRetry(
   maxTokens: number,
   model: string = CHAT_MODEL
 ): Promise<unknown | null> {
+  // 优先 JSON Mode（修订/建图对结构敏感）
+  const first = await chatJson(env, messages, maxTokens, model)
+  if (first) return first
+
   const raw = await chat(env, messages, maxTokens, model)
   const parsed = extractJson(raw)
   if (parsed) return parsed
+  if (!raw.trim()) {
+    console.error('chatJsonWithRetry: empty model response')
+    return null
+  }
   const retryMsgs = [
     ...messages,
     { role: 'assistant', content: raw.slice(0, 2000) },
@@ -550,8 +636,48 @@ async function chatJsonWithRetry(
       content: '上一次输出不是合法 JSON。请只输出严格合法的 JSON 对象，不要 markdown 围栏，不要解释。',
     },
   ]
+  // 重试仍走 JSON Mode
+  const retry = await chatJson(env, retryMsgs, maxTokens, model)
+  if (retry) return retry
   const retryRaw = await chat(env, retryMsgs, maxTokens, model)
   return extractJson(retryRaw)
+}
+
+/** 压缩草稿进 prompt，降低多轮修订时输出截断概率 */
+function compactDraftForPrompt(draft: GraphDraft): string {
+  const nodes = draft.nodes.slice(0, MAX_DRAFT_NODES).map((n) => ({
+    id: n.id,
+    name: n.name,
+    domain: n.domain,
+    level: n.level,
+    tags: (n.tags ?? []).slice(0, 4),
+  }))
+  const edges = draft.edges.slice(0, MAX_DRAFT_EDGES).map((e) => ({
+    source: e.source,
+    target: e.target,
+    type: e.type,
+  }))
+  return JSON.stringify({ nodes, edges })
+}
+
+function parseRevisePayload(
+  parsed: unknown,
+  draft: GraphDraft,
+  keepIds: Set<string>,
+  allowed: string[],
+  fb: string
+): GraphDraft | null {
+  if (!parsed || typeof parsed !== 'object') return null
+  const p = parsed as { ops?: unknown; nodes?: unknown; edges?: unknown }
+  if (Array.isArray(p.ops) && p.ops.length) {
+    const next = applyDraftOps(draft, p.ops as DraftOp[], keepIds, allowed, fb)
+    return next.nodes.length ? next : null
+  }
+  if (p.nodes) {
+    const next = sanitizeGraphDraft({ nodes: p.nodes, edges: p.edges }, keepIds, allowed, fb)
+    return next.nodes.length ? next : null
+  }
+  return null
 }
 
 /**
@@ -694,51 +820,74 @@ export async function reviseGraphDraft(
   const keepIds = anchor?.mode === 'extend' && anchor.nodeId
     ? new Set([anchor.nodeId])
     : new Set<string>()
+  const draftJson = compactDraftForPrompt(draft)
+  const namesHint = existingNames.length
+    ? existingNames.slice(0, 40).join('、')
+    : '（无）'
+  const edgeHint = keepIds.size
+    ? `；允许挂接到锚定已有节点 id=\`${anchor!.nodeId}\``
+    : ''
 
-  const prompt = `你是学习路线规划专家，正在与用户共同敲定一份知识图谱草稿。
+  const system = '你是学习路线规划专家。只输出一个 JSON 对象，不要 markdown，不要解释。'
 
-【当前草稿（JSON）】
-${JSON.stringify(draft)}
+  // 第一轮：优先局部 ops（输出短，不易截断）
+  const opsPrompt = `按用户意见修订知识图谱草稿。优先输出局部 ops；改动很大时再给完整 nodes+edges。
 
-【用户图谱已有知识点（避免重复）】
-${existingNames.length ? existingNames.slice(0, 80).join('、') : '（无）'}
+【当前草稿】
+${draftJson}
+
+【已有知识点（避免重复）】${namesHint}
 ${formatAnchorHint(anchor)}
 【变更意图】
 ${intent}
 
-请按用户最新意见修订。优先输出局部操作 ops（add_node / remove_node / update_node / add_edge / remove_edge）；
-若改动过大也可直接给完整 nodes + edges。
 要求：
 1. domain 只能是：${allowed.join(' / ')}
-2. 边类型：prerequisite / related / extend；端点优先为草稿节点 id${keepIds.size ? `；允许挂接到锚定已有节点 id=\`${anchor!.nodeId}\`` : ''}
-3. reply 用一句中文简述本次改动
-4. 只输出 JSON，格式之一：
-{"reply":"...","ops":[{"op":"add_node","node":{...}}]}
-或
-{"reply":"...","nodes":[...],"edges":[...]}`
+2. 边类型：prerequisite / related / extend；端点优先草稿节点 id${edgeHint}
+3. reply 一句中文简述改动
+4. JSON 二选一：
+{"reply":"...","ops":[{"op":"add_node","node":{"id":"...","name":"...","domain":"...","level":1,"tags":[]}}]}
+{"reply":"...","nodes":[...],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
 
-  const parsed = await chatJsonWithRetry(env, [
-    { role: 'system', content: '你是学习路线规划专家，只输出严格合法的 JSON，不要任何解释文字。' },
-    { role: 'user', content: prompt },
-  ], 4000, CHAT_MODEL) as {
-    reply?: unknown
-    ops?: unknown
-    nodes?: unknown
-    edges?: unknown
-  } | null
+  let parsed = await chatJsonWithRetry(env, [
+    { role: 'system', content: system },
+    { role: 'user', content: opsPrompt },
+  ], 3500, CHAT_MODEL) as { reply?: unknown } | null
 
-  if (!parsed) throw new Error('模型未能生成有效的修订草稿，请换一种说法再试')
+  let next = parseRevisePayload(parsed, draft, keepIds, allowed, fb)
 
-  let next: GraphDraft
-  if (Array.isArray(parsed.ops) && parsed.ops.length) {
-    next = applyDraftOps(draft, parsed.ops as DraftOp[], keepIds, allowed, fb)
-  } else if (parsed.nodes) {
-    next = sanitizeGraphDraft({ nodes: parsed.nodes, edges: parsed.edges }, keepIds, allowed, fb)
-  } else {
-    throw new Error('修订结果缺少 ops 或 nodes，请重新描述你的需求')
+  // 回退：强制整图重写（仍用压缩草稿）
+  if (!next) {
+    console.error('reviseGraphDraft: ops/parse failed, fallback to full rewrite', {
+      hasParsed: !!parsed,
+      intent: intent.slice(0, 120),
+    })
+    const rewritePrompt = `用户要求修改学习图谱。请输出修订后的完整图谱 JSON（不要 ops）。
+
+【当前草稿】
+${draftJson}
+
+【变更意图】
+${intent}
+${formatAnchorHint(anchor)}
+
+要求：
+1. 保留仍合理的节点，按意见增删改
+2. domain 只能是：${allowed.join(' / ')}
+3. 边类型 prerequisite/related/extend；端点须有效${edgeHint}
+4. 输出：{"reply":"一句中文","nodes":[{"id":"...","name":"...","domain":"...","level":1,"tags":[]}],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
+
+    parsed = await chatJsonWithRetry(env, [
+      { role: 'system', content: system },
+      { role: 'user', content: rewritePrompt },
+    ], 4000, CHAT_MODEL) as { reply?: unknown } | null
+    next = parseRevisePayload(parsed, draft, keepIds, allowed, fb)
   }
-  if (!next.nodes.length) throw new Error('修订后的草稿为空，请重新描述你的需求')
-  const reply = String(parsed.reply ?? '').trim().slice(0, 300)
+
+  if (!next) {
+    throw new Error('模型未能生成有效的修订草稿，请换一种说法再试')
+  }
+  const reply = String((parsed as { reply?: unknown } | null)?.reply ?? '').trim().slice(0, 300)
     || `已按「${lastUser.slice(0, 40)}」更新图谱草稿`
   return { draft: next, reply, searchConfigured: isSearchConfigured(env) }
 }

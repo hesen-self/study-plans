@@ -3,8 +3,10 @@ import assert from 'node:assert/strict'
 import {
   applyDraftOps,
   draftToRoadmapSteps,
+  extractJson,
   isTechDomain,
   previewDraftConflicts,
+  repairTruncatedJson,
   sanitizeGraphDraft,
   suggestLinksToExisting,
 } from '../worker/agent.ts'
@@ -73,11 +75,19 @@ test('自定义领域白名单：不在清单内的落到 fallback', () => {
   assert.equal(d.nodes[1].domain, 'backend')
 })
 
-test('边端点不引用已有节点 id（与前端预览口径一致）', () => {
+test('边可挂接到已有节点 id（扩展锚定 / 落库桥接）', () => {
   const d = sanitizeGraphDraft({
     nodes: [{ id: 'a', name: 'A', domain: 'backend', level: 1, tags: [] }],
     edges: [{ source: 'existing', target: 'a', type: 'related' }],
   }, new Set(['existing']))
+  assert.deepEqual(d.edges, [{ source: 'existing', target: 'a', type: 'related' }])
+})
+
+test('真正的 orphan 边仍丢弃', () => {
+  const d = sanitizeGraphDraft({
+    nodes: [{ id: 'a', name: 'A', domain: 'backend', level: 1, tags: [] }],
+    edges: [{ source: 'ghost', target: 'a', type: 'related' }],
+  }, new Set())
   assert.deepEqual(d.edges, [])
 })
 
@@ -199,4 +209,19 @@ test('评测样例：合法草稿应有节点、合法领域、无 orphan、含 
     assert.ok(d.edges.every((e) => ids.has(e.source) && ids.has(e.target)))
     assert.ok(d.edges.some((e) => e.type === 'prerequisite'))
   }
+})
+
+test('extractJson：去掉围栏与尾逗号', () => {
+  const parsed = extractJson('```json\n{"reply":"ok","ops":[{"op":"remove_node","id":"a"},]}\n```')
+  assert.deepEqual(parsed, { reply: 'ok', ops: [{ op: 'remove_node', id: 'a' }] })
+})
+
+test('extractJson：修复截断的对象', () => {
+  const truncated = '{"reply":"加深","nodes":[{"id":"a","name":"A","domain":"backend","level":1,"tags":['
+  const repaired = repairTruncatedJson(truncated)
+  assert.ok(repaired.includes(']'))
+  assert.ok(repaired.includes('}'))
+  const parsed = extractJson(truncated)
+  assert.ok(parsed && typeof parsed === 'object')
+  assert.equal((parsed as { reply: string }).reply, '加深')
 })
