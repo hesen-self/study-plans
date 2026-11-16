@@ -3,6 +3,8 @@ import { api, Profile } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { PageHeader } from '@/components/ui/page-header'
+import { Panel } from '@/components/ui/panel'
 
 const EMPTY: Profile = {
   user_id: 'default',
@@ -101,88 +103,88 @@ export default function ProfileView() {
   const displaySrc = localPreview || profile.avatar
 
   return (
-    <div className="mx-auto max-w-2xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">个人资料</h1>
-        {saved && <span className="text-sm text-muted-foreground">已保存</span>}
-      </div>
-      <p className="mt-1 text-sm text-muted-foreground">维护你的个人信息，随学习记录一起沉淀。</p>
+    <div className="mx-auto max-w-2xl stack">
+      <PageHeader title="个人资料" desc="维护你的个人信息，随学习记录一起沉淀。">
+        {saved ? <span className="text-sm text-muted-foreground">已保存</span> : null}
+      </PageHeader>
 
-      <div className="mt-6 space-y-5 rounded-lg border border-border bg-card p-6">
-        <div className="flex items-center gap-4">
-          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-full border border-border bg-secondary">
-            {displaySrc ? (
-              <img src={displaySrc} alt="头像" className="h-full w-full object-cover" />
-            ) : (
-              <span className="flex h-full items-center justify-center text-2xl text-muted-foreground">
-                {profile.nickname?.slice(0, 1) || '?'}
-              </span>
-            )}
-          </div>
-          <div className="flex-1">
-            {field('nickname', '昵称', '你的昵称')}
-            <div className="mt-3">
-              <p className="mb-1 text-sm text-muted-foreground">头像</p>
-              <input
-                ref={fileRef}
-                type="file"
-                accept={ACCEPT}
-                className="sr-only"
-                disabled={uploading}
-                onChange={(e) => void onPickFile(e.target.files?.[0])}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={uploading}
-                onClick={() => fileRef.current?.click()}
-              >
-                {uploading ? '上传中…' : '上传图片'}
-              </Button>
-              <p className="mt-1 text-sm text-muted-foreground">支持 JPG、PNG、WebP、GIF，最大 5MB。</p>
-              {uploadOk && <p className="mt-1 text-sm text-muted-foreground">头像已更新</p>}
-              {uploadError && <p className="mt-1 text-sm text-destructive">{uploadError}</p>}
+      <Panel title="基本信息">
+        <div className="space-y-5">
+          <div className="flex items-center gap-4">
+            <div className="h-20 w-20 shrink-0 overflow-hidden rounded-full border border-border bg-secondary">
+              {displaySrc ? (
+                <img src={displaySrc} alt="头像" className="h-full w-full object-cover" />
+              ) : (
+                <span className="flex h-full items-center justify-center text-2xl text-muted-foreground">
+                  {profile.nickname?.slice(0, 1) || '?'}
+                </span>
+              )}
+            </div>
+            <div className="flex-1">
+              {field('nickname', '昵称', '你的昵称')}
+              <div className="mt-3">
+                <p className="mb-1 text-sm text-muted-foreground">头像</p>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept={ACCEPT}
+                  className="sr-only"
+                  disabled={uploading}
+                  onChange={(e) => void onPickFile(e.target.files?.[0])}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={uploading}
+                  onClick={() => fileRef.current?.click()}
+                >
+                  {uploading ? '上传中…' : '上传图片'}
+                </Button>
+                <p className="mt-1 text-sm text-muted-foreground">支持 JPG、PNG、WebP、GIF，最大 5MB。</p>
+                {uploadOk && <p className="mt-1 text-sm text-muted-foreground">头像已更新</p>}
+                {uploadError && <p className="mt-1 text-sm text-destructive">{uploadError}</p>}
+              </div>
             </div>
           </div>
-        </div>
 
-        <div>
-          <label className="mb-1 block text-sm text-muted-foreground">简介</label>
-          <Textarea
-            value={profile.bio}
-            onChange={(e) => set('bio', e.target.value)}
-            placeholder="一句话介绍自己…"
-            className="min-h-[70px]"
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm text-muted-foreground">目标 / 座右铭</label>
-          <Textarea
-            value={profile.goal}
-            onChange={(e) => set('goal', e.target.value)}
-            placeholder="当前学习目标或座右铭…"
-            className="min-h-[70px]"
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="mb-1 block text-sm text-muted-foreground">登录邮箱</label>
-            <Input value={profile.email} readOnly placeholder="you@example.com" className="bg-muted" />
+            <label className="mb-1 block text-sm text-muted-foreground">简介</label>
+            <Textarea
+              value={profile.bio}
+              onChange={(e) => set('bio', e.target.value)}
+              placeholder="一句话介绍自己…"
+              className="min-h-[70px]"
+            />
           </div>
-          {field('phone', '电话', '…')}
-          {field('location', '所在地', '…')}
-          {field('website', '个人主页', 'https://…')}
-        </div>
 
-        {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+          <div>
+            <label className="mb-1 block text-sm text-muted-foreground">目标 / 座右铭</label>
+            <Textarea
+              value={profile.goal}
+              onChange={(e) => set('goal', e.target.value)}
+              placeholder="当前学习目标或座右铭…"
+              className="min-h-[70px]"
+            />
+          </div>
 
-        <div className="flex justify-end">
-          <Button onClick={() => void save()} disabled={saving || uploading}>{saving ? '保存中…' : '保存'}</Button>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1 block text-sm text-muted-foreground">登录邮箱</label>
+              <Input value={profile.email} readOnly placeholder="you@example.com" className="bg-muted" />
+            </div>
+            {field('phone', '电话', '…')}
+            {field('location', '所在地', '…')}
+            {field('website', '个人主页', 'https://…')}
+          </div>
+
+          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+
+          <div className="flex justify-end">
+            <Button onClick={() => void save()} disabled={saving || uploading}>{saving ? '保存中…' : '保存'}</Button>
+          </div>
         </div>
-      </div>
+      </Panel>
     </div>
   )
 }

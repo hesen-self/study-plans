@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { ProgressBar } from '@/components/ui/progress-bar'
+import { PageHeader } from '@/components/ui/page-header'
+import { Panel } from '@/components/ui/panel'
 import { cnMonth, cnShift, cnToday, monthRange, weekRange } from '@/lib/date'
 import { downloadText, toCsvCell } from '@/lib/utils'
 
@@ -198,33 +200,42 @@ export default function StatsView() {
   const hours = summary ? (summary.total.minutes / 60).toFixed(1) : '0'
 
   return (
-    <div>
-      {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
+    <div className="stack">
+      <PageHeader title="打卡统计" desc="记录学习时长、查看热力与领域分布，并设定每日 / 每周目标。" />
 
-      <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <div className="rounded-lg border border-border bg-card p-3.5">
-          <div className="text-2xl font-semibold">{summary?.streak ?? 0} 天</div>
-          <div className="text-sm text-muted-foreground">连续打卡</div>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-3.5">
-          <div className="text-2xl font-semibold">{hours} h</div>
-          <div className="text-sm text-muted-foreground">累计学习时长</div>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-3.5">
-          <div className="text-2xl font-semibold">{summary?.total.count ?? 0} 次</div>
-          <div className="text-sm text-muted-foreground">打卡次数</div>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-3.5">
-          <div className="text-2xl font-semibold">
-            {nodes.filter((n) => n.status === 'done').length}/{nodes.length}
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
+        <Panel flush>
+          <div className="px-5 py-4">
+            <div className="text-2xl font-semibold">{summary?.streak ?? 0} 天</div>
+            <div className="text-sm text-muted-foreground">连续打卡</div>
           </div>
-          <div className="text-sm text-muted-foreground">已掌握知识点</div>
-        </div>
+        </Panel>
+        <Panel flush>
+          <div className="px-5 py-4">
+            <div className="text-2xl font-semibold">{hours} h</div>
+            <div className="text-sm text-muted-foreground">累计学习时长</div>
+          </div>
+        </Panel>
+        <Panel flush>
+          <div className="px-5 py-4">
+            <div className="text-2xl font-semibold">{summary?.total.count ?? 0} 次</div>
+            <div className="text-sm text-muted-foreground">打卡次数</div>
+          </div>
+        </Panel>
+        <Panel flush>
+          <div className="px-5 py-4">
+            <div className="text-2xl font-semibold">
+              {nodes.filter((n) => n.status === 'done').length}/{nodes.length}
+            </div>
+            <div className="text-sm text-muted-foreground">已掌握知识点</div>
+          </div>
+        </Panel>
       </div>
 
-      <div className="mb-4 rounded-lg border border-border bg-card p-4">
-        <h3 className="text-lg font-medium">今日打卡</h3>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+      <Panel title="今日打卡">
+        <div className="flex flex-wrap items-center gap-2">
           <Select value={nodeId} onChange={(e) => setNodeId(e.target.value)} className="w-52">
             <option value="">选择知识点…</option>
             {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
@@ -247,12 +258,12 @@ export default function StatsView() {
         <p className="mt-2 text-xs text-muted-foreground">
           打卡会按该知识点累计时长自动推进学习进度与路线步骤状态（每 120 分钟视为掌握）。
         </p>
-      </div>
+      </Panel>
 
-      <div className="mb-4 rounded-lg border border-border bg-card p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-lg font-medium">学习目标</h3>
-          <div className="flex flex-wrap items-center gap-2">
+      <Panel
+        title="学习目标"
+        tools={
+          <>
             <Input
               type="number" min={0} step={10} value={draft.daily}
               onChange={(e) => setDraft({ ...draft, daily: Number(e.target.value) })}
@@ -266,34 +277,32 @@ export default function StatsView() {
             />
             <span className="text-xs text-muted-foreground">分钟/周</span>
             <Button variant="outline" size="sm" onClick={saveGoals}>保存目标</Button>
-          </div>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-6">
+          </>
+        }
+      >
+        <div className="flex flex-wrap gap-6">
           <GoalBar label="今日" actual={todayMinutes} target={goals.daily} />
           <GoalBar label="本周" actual={weekMinutes} target={goals.weekly} />
         </div>
-      </div>
+      </Panel>
 
-      <div className="mb-4 rounded-lg border border-border bg-card p-4">
-        <h3 className="text-lg font-medium">打卡热力图（近一年）</h3>
+      <Panel title="打卡热力图（近一年）">
         <div ref={heatmapRef} className="h-[220px] w-full" />
-      </div>
+      </Panel>
 
-      <div className="mb-4 flex flex-wrap gap-4">
-        <div className="min-w-[320px] flex-1 rounded-lg border border-border bg-card p-4">
-          <h3 className="text-lg font-medium">领域时间分布</h3>
+      <div className="flex flex-wrap gap-4">
+        <Panel title="领域时间分布" className="min-w-[320px] flex-1">
           <div ref={pieRef} className="h-[260px] w-full" />
-        </div>
-        <div className="min-w-[320px] flex-1 rounded-lg border border-border bg-card p-4">
-          <h3 className="text-lg font-medium">近 12 周学习时长</h3>
+        </Panel>
+        <Panel title="近 12 周学习时长" className="min-w-[320px] flex-1">
           <div ref={barRef} className="h-[260px] w-full" />
-        </div>
+        </Panel>
       </div>
 
-      <div className="rounded-lg border border-border bg-card p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-lg font-medium">打卡记录</h3>
-          <div className="flex flex-wrap items-center gap-2">
+      <Panel
+        title="打卡记录"
+        tools={
+          <>
             <Input
               type="month" value={month}
               onChange={(e) => setMonth(e.target.value || cnMonth())}
@@ -306,9 +315,10 @@ export default function StatsView() {
             <Button variant="outline" size="sm" onClick={exportCsv} disabled={!checkins.length}>
               导出 CSV
             </Button>
-          </div>
-        </div>
-        <table className="mt-2 w-full border-collapse text-sm">
+          </>
+        }
+      >
+        <table className="w-full border-collapse text-sm">
           <thead>
             <tr>
               <th className="border-b border-border p-2 text-left">日期</th>
@@ -337,7 +347,7 @@ export default function StatsView() {
             )}
           </tbody>
         </table>
-      </div>
+      </Panel>
     </div>
   )
 }

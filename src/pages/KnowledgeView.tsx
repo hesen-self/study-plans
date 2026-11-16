@@ -5,6 +5,8 @@ import { api, DOMAIN_LABEL, KnowledgeDoc, KnowledgeJob } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { PageHeader } from '@/components/ui/page-header'
+import { Panel } from '@/components/ui/panel'
 import { sanitizeHtml, safeHttpUrl } from '@/lib/sanitize'
 import { downloadText } from '@/lib/utils'
 
@@ -388,28 +390,23 @@ export default function KnowledgeView() {
   const percent = job?.total ? Math.round((job.completed / job.total) * 100) : 0
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">知识库</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            服务端按拓扑序批量生成教材，任务可取消、可断点续跑；教材支持人工编辑与导出。
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={exportAll} disabled={!docs.length}>导出整本</Button>
-          <Button variant="outline" size="sm" onClick={() => startJob(true)} disabled={jobBusy || jobActive || !nodes.length}>
-            重建全部
-          </Button>
-          <Button onClick={() => startJob(false)} disabled={jobBusy || jobActive || !nodes.length}>
-            {jobActive ? '任务进行中' : jobBusy ? '创建中…' : '一键生成知识库'}
-          </Button>
-        </div>
-      </div>
+    <div className="mx-auto max-w-6xl stack">
+      <PageHeader
+        title="知识库"
+        desc="服务端按拓扑序批量生成教材，任务可取消、可断点续跑；教材支持人工编辑与导出。"
+      >
+        <Button variant="outline" size="sm" onClick={exportAll} disabled={!docs.length}>导出整本</Button>
+        <Button variant="outline" size="sm" onClick={() => startJob(true)} disabled={jobBusy || jobActive || !nodes.length}>
+          重建全部
+        </Button>
+        <Button onClick={() => startJob(false)} disabled={jobBusy || jobActive || !nodes.length}>
+          {jobActive ? '任务进行中' : jobBusy ? '创建中…' : '一键生成知识库'}
+        </Button>
+      </PageHeader>
 
       {jobActive && job && (
-        <div className="mt-3 rounded-lg border border-border bg-card p-3 text-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+        <Panel title="生成任务">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
             <span>
               服务端任务：{job.status === 'running' ? '生成中' : '本批完成，待续跑'} · {job.completed}/{job.total} 章 · 失败 {job.failed} 章
               {job.current_node && <span className="ml-2 text-muted-foreground">当前：{job.current_node}</span>}
@@ -433,48 +430,40 @@ export default function KnowledgeView() {
             />
             自动续跑剩余章节（关闭后需手动点「继续生成」）
           </label>
-        </div>
+        </Panel>
       )}
 
       {(progress || error) && (
-        <p className={`mt-3 text-sm ${error ? 'text-destructive' : 'text-muted-foreground'}`}>
+        <p className={`text-sm ${error ? 'text-destructive' : 'text-muted-foreground'}`}>
           {error || progress}
         </p>
       )}
 
       {nodes.length === 0 ? (
-        <div className="mt-8 rounded-lg border border-dashed border-border p-10 text-center">
-          <p className="text-muted-foreground">图谱为空，请先在知识图谱中构建内容。</p>
-        </div>
+        <Panel>
+          <p className="py-6 text-center text-muted-foreground">图谱为空，请先在知识图谱中构建内容。</p>
+        </Panel>
       ) : (
-        <div className="mt-6 flex gap-6">
+        <div className="flex gap-6">
           <aside className="w-64 shrink-0">
-            <div className="sticky top-4 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-lg border border-border bg-card">
-              <div className="border-b border-border px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                目录
-              </div>
-              <nav className="p-2">
+            <Panel title="目录" flush>
+              <nav className="max-h-[calc(100dvh-220px)] overflow-y-auto p-2">
                 {tree.map((item) => renderTreeItem(item, 0))}
               </nav>
-            </div>
+            </Panel>
           </aside>
 
           <main className="min-w-0 flex-1">
             {selectedNode ? (
-              <article className="rounded-lg border border-border bg-card p-6">
-                <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <div className="mb-1 text-xs text-muted-foreground">
-                      {DOMAIN_LABEL[selectedNode.domain] ?? selectedNode.domain} · 难度 {selectedNode.level}
-                      {selectedDoc?.is_edited === 1 && <span className="ml-2 text-primary">已人工编辑</span>}
-                    </div>
-                    <h2 className="text-xl font-semibold tracking-tight">
-                      {streamingId === selectedId && streamTitle
-                        ? streamTitle.trim()
-                        : (selectedDoc?.title ?? selectedNode.name)}
-                    </h2>
-                  </div>
-                  <div className="flex gap-2">
+              <Panel
+                title={
+                  streamingId === selectedId && streamTitle
+                    ? streamTitle.trim()
+                    : (selectedDoc?.title ?? selectedNode.name)
+                }
+                meta={`${DOMAIN_LABEL[selectedNode.domain] ?? selectedNode.domain} · 难度 ${selectedNode.level}${selectedDoc?.is_edited === 1 ? ' · 已人工编辑' : ''}`}
+                tools={
+                  <>
                     {selectedDoc && !editing && streamingId !== selectedId && (
                       <>
                         <Button variant="outline" size="sm" onClick={exportCurrent}>导出本章</Button>
@@ -489,8 +478,9 @@ export default function KnowledgeView() {
                     >
                       {rebuilding === selectedNode.id ? '构建中…' : '重新构建'}
                     </Button>
-                  </div>
-                </div>
+                  </>
+                }
+              >
 
                 {streamingId === selectedId ? (
                   <>
@@ -558,11 +548,11 @@ export default function KnowledgeView() {
                     </p>
                   </div>
                 )}
-              </article>
+              </Panel>
             ) : (
-              <div className="rounded-lg border border-dashed border-border p-10 text-center">
-                <p className="text-muted-foreground">请从左侧目录选择节点查看教材。</p>
-              </div>
+              <Panel>
+                <p className="py-6 text-center text-muted-foreground">请从左侧目录选择节点查看教材。</p>
+              </Panel>
             )}
           </main>
         </div>

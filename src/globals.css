@@ -4,24 +4,73 @@
 
 @layer base {
   :root {
-    --background: 40 33% 97%;
-    --foreground: 36 12% 10%;
-    --card: 0 0% 100%;
-    --card-foreground: 36 12% 10%;
-    --primary: 210 75% 37%;
+    /* shadcn 语义色（HSL 分量）← 珍珠玻璃冷灰绿基线 */
+    --background: 150 14% 97%;
+    --foreground: 210 14% 8%;
+    --card: 180 14% 99%;
+    --card-foreground: 210 14% 8%;
+    --primary: 217 81% 52%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 40 20% 94%;
-    --secondary-foreground: 36 12% 10%;
-    --muted: 40 20% 94%;
-    --muted-foreground: 36 8% 45%;
-    --accent: 210 75% 37%;
+    --secondary: 150 10% 92%;
+    --secondary-foreground: 210 14% 8%;
+    --muted: 150 10% 92%;
+    --muted-foreground: 195 8% 38%;
+    --accent: 217 81% 52%;
     --accent-foreground: 0 0% 100%;
-    --destructive: 0 62% 41%;
+    --destructive: 4 72% 55%;
     --destructive-foreground: 0 0% 100%;
-    --border: 36 12% 88%;
-    --input: 36 12% 88%;
-    --ring: 210 75% 37%;
-    --radius: 0.5rem;
+    --border: 200 8% 86%;
+    --input: 200 8% 86%;
+    --ring: 217 81% 52%;
+    --radius: 0.75rem;
+
+    /* 珍珠玻璃令牌 */
+    --ink: #101418;
+    --ink-muted: #596368;
+    --ink-soft: #7e888c;
+    --ink-faint: #99a2a5;
+    --blue: #236de9;
+    --lime: #82dd2d;
+    --lime-soft: rgba(130, 221, 45, 0.14);
+    --red: #ff5a50;
+    --red-text: #e0443b;
+    --focus: rgba(35, 109, 233, 0.8);
+
+    --r-xs: 8px;
+    --r-sm: 12px;
+    --r-md: 16px;
+    --r-lg: 20px;
+    --r-xl: 24px;
+
+    --shade: 46, 58, 62;
+    --line: rgba(var(--shade), 0.085);
+    --line-strong: rgba(var(--shade), 0.11);
+    --glass-line: rgba(255, 255, 255, 0.88);
+    --e1: 0 1px 2px rgba(var(--shade), 0.05), 0 5px 14px rgba(var(--shade), 0.04);
+    --e2: 0 1px 3px rgba(var(--shade), 0.06), 0 12px 30px rgba(var(--shade), 0.055);
+    --e3: 0 2px 6px rgba(var(--shade), 0.07), 0 22px 50px rgba(var(--shade), 0.08);
+    --edge: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    --edge-strong: inset 0 1px 0 rgba(255, 255, 255, 0.98);
+
+    --stage: #dfe3e2;
+    --frame: #17191d;
+    --canvas: #f6f8f7;
+    --rail-bg: rgba(250, 251, 250, 0.92);
+    --pill-bg: linear-gradient(145deg, rgba(255, 255, 255, 0.93), rgba(246, 251, 249, 0.62));
+    --pill-inset: inset 0 -1px 0 rgba(105, 122, 128, 0.08);
+    --float-bg: rgba(246, 248, 247, 0.86);
+    --float-inset: inset 0 0 0 1px rgba(120, 132, 135, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    --surface: linear-gradient(145deg, rgba(255, 255, 255, 0.97), rgba(249, 252, 251, 0.93));
+    --surface-solid: #fbfcfc;
+    --hover-bg: rgba(var(--shade), 0.045);
+    --overlay: rgba(16, 20, 24, 0.26);
+    --dark-surface: #131619;
+    --ambient-a: rgba(130, 221, 45, 0.07);
+    --ambient-b: rgba(35, 109, 233, 0.055);
+
+    --ease-premium: cubic-bezier(0.16, 1, 0.3, 1);
+    --rail-w: 232px;
+    --topbar-h: 64px;
   }
 }
 
@@ -30,9 +79,10 @@
     border-color: hsl(var(--border));
   }
   body {
-    background-color: hsl(var(--background));
+    background-color: var(--stage);
     color: hsl(var(--foreground));
-    font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-family: 'SF Pro Display', 'SF Pro Text', 'PingFang SC', -apple-system, BlinkMacSystemFont,
+      'Noto Sans SC', 'Microsoft YaHei', sans-serif;
     font-size: 0.875rem;
   }
 }
@@ -165,4 +215,3 @@
     border-radius: 0.5rem;
   }
 }
-

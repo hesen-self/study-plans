@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { cn } from '@/lib/utils'
+import { Navigate, Route, Routes } from 'react-router-dom'
 import { api } from '@/api'
+import AppShell from '@/components/layout/AppShell'
 import GraphView from '@/pages/GraphView'
 import RoadmapView from '@/pages/RoadmapView'
 import StatsView from '@/pages/StatsView'
@@ -9,15 +9,6 @@ import ProfileView from '@/pages/ProfileView'
 import KnowledgeView from '@/pages/KnowledgeView'
 import DomainView from '@/pages/DomainView'
 import LoginView from '@/pages/LoginView'
-
-const navItems = [
-  { to: '/graph', label: '知识图谱' },
-  { to: '/roadmap', label: '学习路线' },
-  { to: '/knowledge', label: '知识库' },
-  { to: '/stats', label: '打卡统计' },
-  { to: '/domains', label: '领域管理' },
-  { to: '/profile', label: '个人资料' },
-]
 
 export default function App() {
   const [authStatus, setAuthStatus] = useState<'loading' | 'authed' | 'guest'>('loading')
@@ -62,7 +53,9 @@ export default function App() {
       setEmail('')
       setNickname('')
     }
-    const onProfileUpdated = () => { void refreshIdentity() }
+    const onProfileUpdated = () => {
+      void refreshIdentity()
+    }
     window.addEventListener('app:unauthorized', onUnauthorized)
     window.addEventListener('app:profile-updated', onProfileUpdated)
     return () => {
@@ -83,7 +76,7 @@ export default function App() {
 
   if (authStatus === 'loading') {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="flex min-h-screen items-center justify-center" style={{ background: 'var(--stage)' }}>
         <p className="text-sm text-muted-foreground">加载中…</p>
       </div>
     )
@@ -94,50 +87,16 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen">
-      <aside className="flex w-[180px] shrink-0 flex-col border-r border-border bg-card px-3 py-5">
-        <div className="px-3 pb-5 text-2xl font-semibold tracking-tight">学习提升</div>
-        <nav className="flex flex-1 flex-col gap-1">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                cn(
-                  'rounded-md px-3 py-2.5 text-sm transition-colors',
-                  isActive
-                    ? 'bg-secondary font-medium text-primary'
-                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                )
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="border-t border-border px-3 pt-3">
-          <p className="mb-2 truncate text-xs text-muted-foreground" title={email}>
-            {nickname.trim() || email}
-          </p>
-          <button
-            onClick={logout}
-            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-          >
-            退出登录
-          </button>
-        </div>
-      </aside>
-      <main className="flex-1 overflow-auto p-5">
-        <Routes>
-          <Route path="/" element={<Navigate to="/graph" replace />} />
-          <Route path="/graph" element={<GraphView />} />
-          <Route path="/roadmap" element={<RoadmapView />} />
-          <Route path="/knowledge" element={<KnowledgeView />} />
-          <Route path="/stats" element={<StatsView />} />
-          <Route path="/domains" element={<DomainView />} />
-          <Route path="/profile" element={<ProfileView />} />
-        </Routes>
-      </main>
-    </div>
+    <AppShell email={email} nickname={nickname} onLogout={() => void logout()}>
+      <Routes>
+        <Route path="/" element={<Navigate to="/graph" replace />} />
+        <Route path="/graph" element={<GraphView />} />
+        <Route path="/roadmap" element={<RoadmapView />} />
+        <Route path="/knowledge" element={<KnowledgeView />} />
+        <Route path="/stats" element={<StatsView />} />
+        <Route path="/domains" element={<DomainView />} />
+        <Route path="/profile" element={<ProfileView />} />
+      </Routes>
+    </AppShell>
   )
 }

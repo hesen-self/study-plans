@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { api, Domain } from '@/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PageHeader } from '@/components/ui/page-header'
+import { Panel } from '@/components/ui/panel'
 
 export default function DomainView() {
   const [domains, setDomains] = useState<Domain[]>([])
@@ -65,18 +67,16 @@ export default function DomainView() {
   if (loading) return <p className="mt-8 text-center text-sm text-muted-foreground">加载中…</p>
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold tracking-tight">领域管理</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        领域为学科粗分类，具体方向用标签二级细分。此处可增删改领域，图例与下拉选项会同步更新。
-      </p>
+    <div className="mx-auto max-w-3xl stack">
+      <PageHeader
+        title="领域管理"
+        desc="领域为学科粗分类，具体方向用标签二级细分。此处可增删改领域，图例与下拉选项会同步更新。"
+      />
 
-      {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {/* 新增领域 */}
-      <div className="mt-6 rounded-lg border border-border bg-card p-4">
-        <h3 className="text-lg font-medium">新增领域</h3>
-        <div className="mt-3 flex flex-wrap items-end gap-2">
+      <Panel title="新增领域">
+        <div className="flex flex-wrap items-end gap-2">
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">标识（英文）</label>
             <Input value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="如 cloud-native" className="w-40" />
@@ -91,44 +91,45 @@ export default function DomainView() {
           </div>
           <Button onClick={add} disabled={!newId.trim() || !newName.trim()}>新增</Button>
         </div>
-      </div>
+      </Panel>
 
-      {/* 领域列表 */}
-      <div className="mt-6 space-y-2">
-        {domains.map((d) => (
-          <div key={d.id} className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
-            {editingId === d.id ? (
-              <>
-                <span className="w-28 shrink-0 text-sm font-mono text-muted-foreground">{d.id}</span>
-                <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="w-44" />
-                <input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} className="h-9 w-16 cursor-pointer rounded-md border border-border" />
-                <div className="ml-auto flex gap-2">
-                  <Button size="sm" onClick={() => saveEdit(d.id)}>保存</Button>
-                  <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>取消</Button>
-                </div>
-              </>
-            ) : (
-              <>
-                <span
-                  className="inline-block h-3.5 w-3.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: d.color }}
-                />
-                <span className="w-28 shrink-0 text-sm font-mono text-muted-foreground">{d.id}</span>
-                <span className="text-sm font-medium">{d.name}</span>
-                <div className="ml-auto flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => startEdit(d)}>编辑</Button>
-                  <Button variant="ghost" size="sm" onClick={() => remove(d)}>删除</Button>
-                </div>
-              </>
-            )}
-          </div>
-        ))}
-        {domains.length === 0 && (
-          <p className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-            暂无领域，请新增。
-          </p>
-        )}
-      </div>
+      <Panel title="领域列表" meta={`${domains.length} 项`}>
+        <div className="space-y-2">
+          {domains.map((d) => (
+            <div key={d.id} className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
+              {editingId === d.id ? (
+                <>
+                  <span className="w-28 shrink-0 text-sm font-mono text-muted-foreground">{d.id}</span>
+                  <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="w-44" />
+                  <input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} className="h-9 w-16 cursor-pointer rounded-md border border-border" />
+                  <div className="ml-auto flex gap-2">
+                    <Button size="sm" onClick={() => saveEdit(d.id)}>保存</Button>
+                    <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>取消</Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span
+                    className="inline-block h-3.5 w-3.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: d.color }}
+                  />
+                  <span className="w-28 shrink-0 text-sm font-mono text-muted-foreground">{d.id}</span>
+                  <span className="text-sm font-medium">{d.name}</span>
+                  <div className="ml-auto flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => startEdit(d)}>编辑</Button>
+                    <Button variant="ghost" size="sm" onClick={() => remove(d)}>删除</Button>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+          {domains.length === 0 && (
+            <p className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+              暂无领域，请新增。
+            </p>
+          )}
+        </div>
+      </Panel>
     </div>
   )
 }

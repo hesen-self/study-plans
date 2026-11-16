@@ -9,6 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { ProgressBar } from '@/components/ui/progress-bar'
+import { PageHeader } from '@/components/ui/page-header'
+import { Panel } from '@/components/ui/panel'
 
 const LEVEL_LABEL: Record<number, string> = { 1: '入门', 2: '进阶', 3: '高级' }
 const NEXT_STATUS: Record<Node['status'], Node['status']> = {
@@ -427,10 +429,30 @@ export default function RoadmapView() {
   if (loading) return <p className="text-sm text-muted-foreground">加载中…</p>
 
   return (
-    <div>
-      {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
+    <div className="stack">
+      <PageHeader
+        title="学习路线"
+        desc="按难度分段编排知识点，拖拽排序并跟踪每步进度。"
+      >
+        <Select
+          value={currentId}
+          onChange={(e) => { setCurrentId(e.target.value); setNotice(''); setUndo(null) }}
+          className="w-56"
+        >
+          {roadmaps.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+        </Select>
+        <Button variant="outline" size="sm" onClick={openCreate}>新建路线</Button>
+        {activeRoadmap && (
+          <>
+            <Button variant="outline" size="sm" onClick={() => openEdit(activeRoadmap)}>编辑</Button>
+            <Button variant="ghost" size="sm" onClick={() => deleteRoadmap(activeRoadmap)}>删除</Button>
+          </>
+        )}
+      </PageHeader>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
       {notice && (
-        <p className="mb-3 text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {notice}
           {undo && undo.roadmapId === currentId && (
             <button
@@ -451,122 +473,106 @@ export default function RoadmapView() {
         </p>
       )}
 
-      {/* 操作区：只放路线切换与管理动作 */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Select
-          value={currentId}
-          onChange={(e) => { setCurrentId(e.target.value); setNotice(''); setUndo(null) }}
-          className="w-56"
-        >
-          {roadmaps.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-        </Select>
-        <Button variant="outline" size="sm" onClick={openCreate}>新建路线</Button>
-        {activeRoadmap && (
-          <>
-            <Button variant="outline" size="sm" onClick={() => openEdit(activeRoadmap)}>编辑</Button>
-            <Button variant="ghost" size="sm" onClick={() => deleteRoadmap(activeRoadmap)}>删除</Button>
-          </>
-        )}
-      </div>
-
       {activeRoadmap && (
         <>
-          {/* 概览卡：沿用 StatsView 的 rounded-lg border border-border bg-card p-4 */}
-          <div className="mb-4 rounded-lg border border-border bg-card p-4">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 className="text-lg font-medium">{activeRoadmap.name}</h2>
-              <span className="text-sm text-muted-foreground">已完成 {doneCount}/{steps.length} 步</span>
-            </div>
+          <Panel title={activeRoadmap.name} meta={`已完成 ${doneCount}/${steps.length} 步`}>
             {activeRoadmap.description && (
-              <p className="mt-1 text-sm text-muted-foreground">{activeRoadmap.description}</p>
+              <p className="mb-3 text-sm text-muted-foreground">{activeRoadmap.description}</p>
             )}
-            <div className="mt-3">
-              <ProgressBar
-                value={steps.length ? Math.round(doneCount / steps.length * 100) : 0}
-                label="整体进度"
-                hint={`${doneCount} / ${steps.length} 步`}
-                ariaLabel="路线整体完成进度"
-              />
-            </div>
+            <ProgressBar
+              value={steps.length ? Math.round(doneCount / steps.length * 100) : 0}
+              label="整体进度"
+              hint={`${doneCount} / ${steps.length} 步`}
+              ariaLabel="路线整体完成进度"
+            />
             {currentLearning && (
               <p className="mt-2 text-sm text-muted-foreground">
                 当前进行中：<span className="text-primary">{currentLearning.name}</span>
               </p>
             )}
-          </div>
+          </Panel>
 
-          {/* 指标卡：与 StatsView 同一套字号与卡片写法 */}
-          <div className="mb-4 grid gap-3 sm:grid-cols-3">
-            <div className="rounded-lg border border-border bg-card p-3.5">
-              <div className="text-2xl font-semibold">{doneCount}/{steps.length}</div>
-              <div className="text-sm text-muted-foreground">已完成步骤</div>
-            </div>
-            <div className="rounded-lg border border-border bg-card p-3.5">
-              <div className="text-2xl font-semibold">{steps.length - doneCount}</div>
-              <div className="text-sm text-muted-foreground">剩余步骤</div>
-            </div>
-            <div className="rounded-lg border border-border bg-card p-3.5">
-              <div className="text-2xl font-semibold">{totalMinutes} 分钟</div>
-              <div className="text-sm text-muted-foreground">本路线累计学习</div>
-            </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Panel flush>
+              <div className="px-5 py-4">
+                <div className="text-2xl font-semibold">{doneCount}/{steps.length}</div>
+                <div className="text-sm text-muted-foreground">已完成步骤</div>
+              </div>
+            </Panel>
+            <Panel flush>
+              <div className="px-5 py-4">
+                <div className="text-2xl font-semibold">{steps.length - doneCount}</div>
+                <div className="text-sm text-muted-foreground">剩余步骤</div>
+              </div>
+            </Panel>
+            <Panel flush>
+              <div className="px-5 py-4">
+                <div className="text-2xl font-semibold">{totalMinutes} 分钟</div>
+                <div className="text-sm text-muted-foreground">本路线累计学习</div>
+              </div>
+            </Panel>
           </div>
         </>
       )}
 
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Select value={addNodeId} onChange={(e) => setAddNodeId(e.target.value)} className="w-64" disabled={!activeRoadmap}>
-          <option value="">选择要加入路线的知识点…</option>
-          {allNodes.filter((n) => !inRoadmap.has(n.id)).map((n) => (
-            <option key={n.id} value={n.id}>{n.name}</option>
-          ))}
-        </Select>
-        <Button onClick={add} disabled={!addNodeId || !activeRoadmap}>加入路线</Button>
-        <span className="text-sm text-muted-foreground">拖拽卡片排序，或选中卡片后按 Alt + ↑ / ↓</span>
-      </div>
+      <Panel
+        title="步骤编排"
+        tools={
+          <>
+            <Select value={addNodeId} onChange={(e) => setAddNodeId(e.target.value)} className="w-64" disabled={!activeRoadmap}>
+              <option value="">选择要加入路线的知识点…</option>
+              {allNodes.filter((n) => !inRoadmap.has(n.id)).map((n) => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+            </Select>
+            <Button onClick={add} disabled={!addNodeId || !activeRoadmap}>加入路线</Button>
+          </>
+        }
+      >
+        <p className="mb-3 text-sm text-muted-foreground">拖拽卡片排序，或选中卡片后按 Alt + ↑ / ↓</p>
 
-      {switching && <p className="mb-3 text-sm text-muted-foreground">路线加载中…</p>}
+        {switching && <p className="mb-3 text-sm text-muted-foreground">路线加载中…</p>}
 
-      {!switching && steps.length === 0 && (
-        <div className="max-w-[640px] rounded-lg border border-border bg-card p-4">
+        {!switching && steps.length === 0 && (
           <p className="text-sm text-muted-foreground">
             {activeRoadmap
               ? '这条路线还没有步骤。从上方选择知识点加入，或前往知识图谱创建节点。'
               : '还没有学习路线，点击「新建路线」开始。'}
           </p>
-        </div>
-      )}
+        )}
 
-      <div className="max-w-[640px]">
-        {segments.map((seg) => {
-          const key = segmentKey(seg)
-          const collapsed = collapsedSegments.has(key)
-          return (
-            <section key={key} className="mb-4">
-              <div className="mb-2 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => toggleSegment(key)}
-                  aria-expanded={!collapsed}
-                  className="text-lg font-medium text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  {LEVEL_LABEL[seg.level]} · {seg.items.length} 步
-                </button>
-                <div className="h-px flex-1 bg-border" />
-                <span className="text-sm text-muted-foreground">
-                  {collapsed ? '点击展开' : '点击折叠'}
-                </span>
-              </div>
-              {!collapsed && (
-                <div role="list" className="flex flex-col">
-                  {seg.items.map((item, itemIdx) =>
-                    renderStep(item.step, item.index, itemIdx > 0, parseTags(item.step.tags))
-                  )}
+        <div className="max-w-[640px]">
+          {segments.map((seg) => {
+            const key = segmentKey(seg)
+            const collapsed = collapsedSegments.has(key)
+            return (
+              <section key={key} className="mb-4">
+                <div className="mb-2 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleSegment(key)}
+                    aria-expanded={!collapsed}
+                    className="text-lg font-medium text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {LEVEL_LABEL[seg.level]} · {seg.items.length} 步
+                  </button>
+                  <div className="h-px flex-1 bg-border" />
+                  <span className="text-sm text-muted-foreground">
+                    {collapsed ? '点击展开' : '点击折叠'}
+                  </span>
                 </div>
-              )}
-            </section>
-          )
-        })}
-      </div>
+                {!collapsed && (
+                  <div role="list" className="flex flex-col">
+                    {seg.items.map((item, itemIdx) =>
+                      renderStep(item.step, item.index, itemIdx > 0, parseTags(item.step.tags))
+                    )}
+                  </div>
+                )}
+              </section>
+            )
+          })}
+        </div>
+      </Panel>
 
       {showEditor && (
         <>
