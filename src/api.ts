@@ -75,6 +75,21 @@ export interface ChatTurn {
   content: string
 }
 
+/** 图谱助手锚定：扩展 / 找资料时绑定已有节点 */
+export interface GraphDraftAnchor {
+  nodeId: string
+  nodeName: string
+  domain?: string
+  mode?: 'build' | 'extend' | 'research'
+}
+
+export type GraphDraftRequest = {
+  messages: ChatTurn[]
+  draft?: GraphDraft | null
+  skipCache?: boolean
+  anchor?: GraphDraftAnchor | null
+}
+
 export interface Profile {
   user_id: string
   nickname: string
@@ -296,14 +311,14 @@ export const api = {
     ),
 
   // 多轮对话生成 / 修订图谱草稿（JSON，不落库）
-  graphDraft: (body: { messages: ChatTurn[]; draft?: GraphDraft | null; skipCache?: boolean }) =>
+  graphDraft: (body: GraphDraftRequest) =>
     req<GraphDraftResponse>('/api/agent/graph-draft', {
       method: 'POST', body: JSON.stringify(body),
     }),
 
   /** SSE 建图：phase → result / error；支持 AbortSignal */
   graphDraftStream: async (
-    body: { messages: ChatTurn[]; draft?: GraphDraft | null; skipCache?: boolean },
+    body: GraphDraftRequest,
     handlers: {
       onPhase?: (phase: 'searching' | 'generating') => void
       onResult?: (r: GraphDraftResponse) => void

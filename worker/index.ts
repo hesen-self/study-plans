@@ -29,6 +29,7 @@ import {
   type ChatTurn,
   type DomainInfo,
   type GraphDraft,
+  type GraphDraftAnchor,
 } from './agent.ts'
 import { nextSnowflakeId } from './snowflake.ts'
 import {
@@ -1053,7 +1054,24 @@ app.post('/api/agent/classify-domain', async (c) => {
   return c.json({ domain })
 })
 
-type GraphDraftBody = { messages?: ChatTurn[]; draft?: GraphDraft | null; skipCache?: boolean }
+type GraphDraftBody = {
+  messages?: ChatTurn[]
+  draft?: GraphDraft | null
+  skipCache?: boolean
+  anchor?: GraphDraftAnchor | null
+}
+
+function normalizeAnchor(raw: GraphDraftBody['anchor']): GraphDraftAnchor | null {
+  if (!raw || typeof raw !== 'object') return null
+  const nodeId = String(raw.nodeId ?? '').trim().slice(0, 80)
+  const nodeName = String(raw.nodeName ?? '').trim().slice(0, 80)
+  if (!nodeId || !nodeName) return null
+  const domain = String(raw.domain ?? '').trim().slice(0, 40) || undefined
+  const mode = raw.mode === 'extend' || raw.mode === 'research' || raw.mode === 'build'
+    ? raw.mode
+    : undefined
+  return { nodeId, nodeName, domain, mode }
+}
 
 async function runGraphDraft(
   env: Bindings,
@@ -1084,6 +1102,16 @@ async function runGraphDraft(
   const rows = existing.results ?? []
   const existingIds = new Set(rows.map((r) => r.id))
   const existingNames = rows.map((r) => r.name)
+  const anchor = normalizeAnchor(b.anchor)
+  const effectiveAnchor: GraphDraftAnchor | null = anchor
+    ? {
+        ...anchor,
+        mode: anchor.mode ?? (existingIds.has(anchor.nodeId) ? 'extend' : 'build'),
+      }
+    : null
+  const keepIds = effectiveAnchor?.mode === 'extend' && existingIds.has(effectiveAnchor.nodeId)
+    ? new Set([effectiveAnchor.nodeId])
+    : new Set<string>()
 
   let result: {
     draft: GraphDraft
@@ -1093,13 +1121,14 @@ async function runGraphDraft(
   }
   if (b.draft && Array.isArray(b.draft.nodes) && b.draft.nodes.length) {
     onPhase?.('generating')
-    const current = sanitizeGraphDraft(b.draft, new Set(), allowed, fb)
-    result = await reviseGraphDraft(env, current, messages, existingNames, domains)
+    const current = sanitizeGraphDraft(b.draft, keepIds, allowed, fb)
+    result = await reviseGraphDraft(env, current, messages, existingNames, domains, effectiveAnchor)
   } else {
     result = await buildGraphDraft(env, lastUser.content.trim(), existingNames, domains, {
       uid,
       skipCache: !!b.skipCache,
       onPhase,
+      anchor: effectiveAnchor,
     })
   }
   const meta = sanitizeGraphDraftWithMeta(result.draft, existingIds, allowed, fb)

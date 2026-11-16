@@ -620,16 +620,23 @@ export default function GraphView() {
       </Panel>
 
       {showAgent && (
-        <div className="fixed inset-y-0 right-0 z-[11] w-[400px] max-w-[90vw] overflow-y-auto border-l border-border bg-card p-5 shadow-lg">
-          <div className="mb-3 flex items-center justify-between">
+        <div className="fixed inset-y-0 right-0 z-[12] flex w-[min(920px,94vw)] flex-col border-l border-border bg-card shadow-lg">
+          <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
             <h2 className="text-lg font-medium">AI 助手</h2>
             <Button variant="ghost" size="sm" onClick={() => setShowAgent(false)}>关闭</Button>
           </div>
-          <AgentPanel onBuilt={load} nodes={nodes} domains={domains} />
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+            <AgentPanel
+              onBuilt={load}
+              nodes={nodes}
+              domains={domains}
+              selectedNode={selectedNode}
+            />
+          </div>
         </div>
       )}
 
-      {selected && (
+      {selected && !showAgent && (
         <NodeDrawer
           key={selected}
           nodeId={selected}

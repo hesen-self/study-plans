@@ -25,6 +25,15 @@ export type GraphDraft = {
 
 // 多轮对话消息：会话历史由前端持有，后端保持无状态
 export type ChatTurn = { role: 'user' | 'assistant'; content: string }
+
+/** 前端传入的图谱锚定：扩展 / 找资料时作为硬约束 */
+export type GraphDraftAnchor = {
+  nodeId: string
+  nodeName: string
+  domain?: string
+  mode?: 'build' | 'extend' | 'research'
+}
+
 // 一轮对话的产物：修订后的完整草稿 + 给用户的自然语言说明
 export type GraphDraftResult = {
   draft: GraphDraft
@@ -351,6 +360,8 @@ export function sanitizeGraphDraftWithMeta(
     const mapped = idMap.get(rawId)
     if (mapped) return mapped
     if (newIds.has(rawId)) return rawId
+    // 允许边挂接到已有节点（扩展锚定 / 落库时保留桥接边）
+    if (existingIds.has(rawId)) return rawId
     return ''
   }
   const seen = new Set<string>()
@@ -497,9 +508,29 @@ export function draftToRoadmapSteps(draft: GraphDraft): { node_id: string; seq: 
   return order.map((node_id, i) => ({ node_id, seq: i + 1 }))
 }
 
-function draftCacheKey(uid: string, topic: string): string {
+function draftCacheKey(uid: string, topic: string, anchorId?: string): string {
   const t = topic.trim().toLowerCase().slice(0, 120)
-  return `agent:draft:${uid}:${t}`
+  const a = (anchorId ?? '').trim().slice(0, 64)
+  return a ? `agent:draft:${uid}:${a}:${t}` : `agent:draft:${uid}:${t}`
+}
+
+function formatAnchorHint(anchor?: GraphDraftAnchor | null): string {
+  if (!anchor?.nodeId || !anchor.nodeName) return ''
+  const domainLine = anchor.domain ? `\n- 锚定领域：${anchor.domain}` : ''
+  if (anchor.mode === 'extend') {
+    return `
+【硬约束 · 扩展已有节点】
+- 用户已选中节点：id=\`${anchor.nodeId}\`，名称「${anchor.nodeName}」${domainLine}
+- 本次草稿是该节点的下游扩展，不要重复生成同名节点
+- 至少一个新节点通过 extend 或 prerequisite 边与「概念锚点」关联；可用 id=\`${anchor.nodeId}\` 作为边的一端（即使它不在 nodes 列表里，确认落库时会挂接）
+- 新节点 domain 优先与锚定领域一致（除非主题明显跨领域）
+`
+  }
+  return `
+【上下文锚定】
+- 用户当前关注节点：id=\`${anchor.nodeId}\`，名称「${anchor.nodeName}」${domainLine}
+- 规划时尽量围绕该节点补齐前置 / 后续知识点
+`
 }
 
 async function chatJsonWithRetry(
@@ -535,16 +566,23 @@ export async function buildGraphDraft(
     uid?: string
     skipCache?: boolean
     onPhase?: (phase: 'searching' | 'generating') => void
+    anchor?: GraphDraftAnchor | null
   } = {}
 ): Promise<GraphDraftResult> {
   const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
   const allowed = domainIds(domainList)
   const fb = fallbackDomainId(domainList)
   const configured = isSearchConfigured(env)
+  const anchor = opts.anchor?.nodeId && opts.anchor.nodeName ? opts.anchor : null
+  const isExtend = anchor?.mode === 'extend'
+  const cacheTopic = anchor ? `${anchor.nodeId}|${topic}` : topic
 
   if (opts.uid && env.STATS_KV && !opts.skipCache) {
     try {
-      const cached = await env.STATS_KV.get(draftCacheKey(opts.uid, topic), 'json') as GraphDraftResult | null
+      const cached = await env.STATS_KV.get(
+        draftCacheKey(opts.uid, topic, anchor?.nodeId),
+        'json'
+      ) as GraphDraftResult | null
       if (cached?.draft?.nodes?.length) {
         return {
           ...cached,
@@ -558,7 +596,7 @@ export async function buildGraphDraft(
   }
 
   opts.onPhase?.('searching')
-  const searchHits = await webSearchTopic(env, topic)
+  const searchHits = await webSearchTopic(env, cacheTopic)
   opts.onPhase?.('generating')
   const searchText = searchHits
     .slice(0, 8)
@@ -573,37 +611,49 @@ export async function buildGraphDraft(
     ? ''
     : '\n注意：当前未配置联网搜索，请基于通用知识规划，并在内容上偏保守。\n'
 
+  const nodeCountHint = isExtend
+    ? '拆解出 4~8 个紧贴锚定节点的下游知识点'
+    : '拆解出 6~12 个核心知识点作为节点，覆盖从入门到进阶的完整学习路径'
+
+  const edgeHint = isExtend
+    ? `节点之间用边连接：prerequisite / related / extend。至少一半新节点应通过边连接到锚定节点 id=\`${anchor!.nodeId}\`（允许边的一端是该已有 id）。`
+    : '节点之间用边连接：prerequisite（前置）、related（相关）、extend（扩展）。必须至少有一条完整的 prerequisite 依赖链（覆盖半数以上节点），不要全是 related。边的端点必须是本次 nodes 里的 id。'
+
   const prompt = `你是一名学习路线规划专家。请根据主题「${topic}」构建一份待用户确认的知识图谱草稿。
 ${offlineHint}
+${formatAnchorHint(anchor)}
 ${searchText ? `以下是联网搜索到的相关背景信息，供你参考：\n${searchText}\n` : ''}
 ${existingHint}
 要求：
-1. 拆解出 6~12 个核心知识点作为节点，覆盖从入门到进阶的完整学习路径。
+1. ${nodeCountHint}。
 2. 每个节点包含：id（英文或拼音 slug）、name（中文名）、domain（领域，从下面清单选最匹配的一个）、level（1入门/2进阶/3高级）、tags（标签数组）。
 3. 领域清单（只能选其一）：
 ${formatDomainPrompt(domainList)}
-4. 节点之间用边连接：prerequisite（前置）、related（相关）、extend（扩展）。
-5. 必须至少有一条完整的 prerequisite 依赖链（覆盖半数以上节点），不要全是 related。
-6. 边的端点必须是本次 nodes 里的 id。
-7. 领域是学科粗分类，交叉方向用 tags 表达，不要发明新领域。
+4. ${edgeHint}
+5. 领域是学科粗分类，交叉方向用 tags 表达，不要发明新领域。
+${isExtend ? `6. 不要把锚定节点「${anchor!.nodeName}」再次放进 nodes；只输出新增节点。` : ''}
 
 只输出 JSON，不要任何解释，格式如下：
 {"nodes":[{"id":"...","name":"...","domain":"...","level":1,"tags":["..."]}],"edges":[{"source":"...","target":"...","type":"prerequisite"}]}`
 
   const parsed = await chatJsonWithRetry(env, [{ role: 'user', content: prompt }], 4000, CHAT_MODEL)
-  const draft = sanitizeGraphDraft(parsed, new Set(), allowed, fb)
+  // 扩展模式允许边挂到锚定已有节点 id
+  const keepIds = isExtend && anchor ? new Set([anchor.nodeId]) : new Set<string>()
+  const draft = sanitizeGraphDraft(parsed, keepIds, allowed, fb)
   if (!draft.nodes.length) throw new Error('模型未能生成有效的图谱结构')
 
   const result: GraphDraftResult = {
     draft,
-    reply: `已生成 ${draft.nodes.length} 个知识点、${draft.edges.length} 条依赖关系。先看看预览，不满意就直接告诉我怎么改。`,
+    reply: isExtend && anchor
+      ? `已围绕「${anchor.nodeName}」生成 ${draft.nodes.length} 个扩展知识点、${draft.edges.length} 条关系。先预览，再告诉我怎么改。`
+      : `已生成 ${draft.nodes.length} 个知识点、${draft.edges.length} 条依赖关系。先看看预览，不满意就直接告诉我怎么改。`,
     sources: searchHits,
     searchConfigured: configured,
   }
 
   if (opts.uid && env.STATS_KV) {
     try {
-      await env.STATS_KV.put(draftCacheKey(opts.uid, topic), JSON.stringify(result), {
+      await env.STATS_KV.put(draftCacheKey(opts.uid, topic, anchor?.nodeId), JSON.stringify(result), {
         expirationTtl: DRAFT_CACHE_TTL,
       })
     } catch {
@@ -633,13 +683,17 @@ export async function reviseGraphDraft(
   draft: GraphDraft,
   messages: ChatTurn[],
   existingNames: string[] = [],
-  domains: DomainInfo[] = DEFAULT_DOMAIN_LIST
+  domains: DomainInfo[] = DEFAULT_DOMAIN_LIST,
+  anchor?: GraphDraftAnchor | null
 ): Promise<GraphDraftResult> {
   const domainList = domains.length ? domains : DEFAULT_DOMAIN_LIST
   const allowed = domainIds(domainList)
   const fb = fallbackDomainId(domainList)
   const intent = summarizeIntent(messages)
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+  const keepIds = anchor?.mode === 'extend' && anchor.nodeId
+    ? new Set([anchor.nodeId])
+    : new Set<string>()
 
   const prompt = `你是学习路线规划专家，正在与用户共同敲定一份知识图谱草稿。
 
@@ -648,7 +702,7 @@ ${JSON.stringify(draft)}
 
 【用户图谱已有知识点（避免重复）】
 ${existingNames.length ? existingNames.slice(0, 80).join('、') : '（无）'}
-
+${formatAnchorHint(anchor)}
 【变更意图】
 ${intent}
 
@@ -656,7 +710,7 @@ ${intent}
 若改动过大也可直接给完整 nodes + edges。
 要求：
 1. domain 只能是：${allowed.join(' / ')}
-2. 边类型：prerequisite / related / extend；端点必须是草稿节点 id
+2. 边类型：prerequisite / related / extend；端点优先为草稿节点 id${keepIds.size ? `；允许挂接到锚定已有节点 id=\`${anchor!.nodeId}\`` : ''}
 3. reply 用一句中文简述本次改动
 4. 只输出 JSON，格式之一：
 {"reply":"...","ops":[{"op":"add_node","node":{...}}]}
@@ -677,9 +731,9 @@ ${intent}
 
   let next: GraphDraft
   if (Array.isArray(parsed.ops) && parsed.ops.length) {
-    next = applyDraftOps(draft, parsed.ops as DraftOp[], new Set(), allowed, fb)
+    next = applyDraftOps(draft, parsed.ops as DraftOp[], keepIds, allowed, fb)
   } else if (parsed.nodes) {
-    next = sanitizeGraphDraft({ nodes: parsed.nodes, edges: parsed.edges }, new Set(), allowed, fb)
+    next = sanitizeGraphDraft({ nodes: parsed.nodes, edges: parsed.edges }, keepIds, allowed, fb)
   } else {
     throw new Error('修订结果缺少 ops 或 nodes，请重新描述你的需求')
   }

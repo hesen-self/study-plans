@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
   ChatTurn,
@@ -6,6 +6,7 @@ import {
   domainLabelOf,
   DraftConflicts,
   GraphDraft,
+  GraphDraftAnchor,
   GraphDraftNode,
   Node,
   WebSearchHit,
@@ -20,7 +21,11 @@ interface Props {
   onBuilt: () => void
   nodes: Node[]
   domains: Domain[]
+  /** 图谱当前选中节点，用于锚定扩展 / 找资料 */
+  selectedNode?: Node | null
 }
+
+type Scene = 'build' | 'extend' | 'research'
 
 type Session = {
   messages: ChatTurn[]
@@ -33,6 +38,21 @@ type Session = {
 const SESSION_KEY = 'study-plans:graph-agent-session'
 const PERSIST_KEY = 'study-plans:graph-agent-saved'
 const MAX_TURNS = 12
+
+const BUILD_TEMPLATES = [
+  '我想系统学习 Java + AI 应用开发',
+  '从零规划云原生（K8s / 微服务）学习路径',
+  '前端工程化 3 个月进阶路线',
+  '数据工程师入门：SQL → 数仓 → 实时',
+  '计算机基础补齐：网络 / 操作系统 / 算法',
+]
+
+const FOLLOWUPS = [
+  { label: '再深一点', text: '整体再深一层，多加进阶与实战节点' },
+  { label: '压缩到 6 个', text: '精简到大约 6 个核心节点，去掉次要分支' },
+  { label: '只要前置链', text: '只保留 prerequisite 依赖链，去掉 related / extend' },
+  { label: '加实战项目', text: '补充 2～3 个可动手的实战项目节点' },
+]
 
 function validDraft(d: unknown): d is GraphDraft {
   if (!d || typeof d !== 'object') return false
@@ -76,8 +96,22 @@ function classifyError(msg: string): string {
   return msg
 }
 
-export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
-  const [mode, setMode] = useState<'build' | 'search'>('build')
+function defaultScene(selected?: Node | null): Scene {
+  return selected ? 'extend' : 'build'
+}
+
+function extendTemplates(node: Node): string[] {
+  return [
+    `在「${node.name}」下扩展进阶与实战子节点`,
+    `补齐「${node.name}」的前置知识点`,
+    `围绕「${node.name}」加 2～3 个项目练习`,
+  ]
+}
+
+export default function AgentPanel({ onBuilt, nodes, domains, selectedNode = null }: Props) {
+  // null = 跟随选中节点自动派生；用户点场景 Tab 后锁定
+  const [sceneManual, setSceneManual] = useState<Scene | null>(null)
+  const scene: Scene = sceneManual ?? defaultScene(selectedNode)
   const [session, setSession] = useState<Session>(() => readSession(SESSION_KEY))
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -87,6 +121,7 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
   const [linkExisting, setLinkExisting] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const chatEndRef = useRef<HTMLDivElement>(null)
 
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<WebSearchHit[] | null>(null)
@@ -96,11 +131,25 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
   const [collectNodeId, setCollectNodeId] = useState('')
   const [collected, setCollected] = useState<Set<string>>(new Set())
 
-  const targetNodeId = collectNodeId || session.draft?.nodes[0]?.id || nodes[0]?.id || ''
+  const targetNodeId = collectNodeId || selectedNode?.id || session.draft?.nodes[0]?.id || nodes[0]?.id || ''
+
+  const anchor: GraphDraftAnchor | null = useMemo(() => {
+    if (!selectedNode) return null
+    return {
+      nodeId: selectedNode.id,
+      nodeName: selectedNode.name,
+      domain: selectedNode.domain,
+      mode: scene === 'research' ? 'research' : scene === 'extend' ? 'extend' : 'build',
+    }
+  }, [selectedNode, scene])
 
   useEffect(() => () => {
     abortRef.current?.abort()
   }, [])
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [session.messages, busy, phase])
 
   const persist = (next: Session) => {
     setSession(next)
@@ -130,9 +179,32 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
     }))
   }
 
-  const send = async () => {
-    const text = input.trim()
+  const switchScene = (next: Scene) => {
+    if (next === scene) return
+    if ((next === 'extend' || next === 'research') && !selectedNode && !nodes.length) {
+      setError(next === 'extend' ? '请先在图谱中选中一个知识点，再扩展' : '请先选中或创建知识点，再找资料')
+      return
+    }
+    if ((next === 'extend' || next === 'research') && !selectedNode) {
+      setError('请先在图谱中选中一个知识点')
+      return
+    }
+    setSceneManual(next)
+    setError('')
+    setNotice('')
+    if (next === 'research' && selectedNode) {
+      setCollectNodeId(selectedNode.id)
+      if (!query.trim()) setQuery(`${selectedNode.name} 学习资料`)
+    }
+  }
+
+  const sendText = async (textRaw: string) => {
+    const text = textRaw.trim()
     if (!text || busy) return
+    if (scene === 'extend' && !selectedNode) {
+      setError('扩展模式需要先选中图谱中的知识点')
+      return
+    }
     setInput('')
     setBusy(true)
     setError('')
@@ -143,7 +215,11 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
     abortRef.current = ac
     try {
       await api.graphDraftStream(
-        { messages, draft: session.draft },
+        {
+          messages,
+          draft: session.draft,
+          anchor: scene === 'extend' || scene === 'build' ? anchor : null,
+        },
         {
           onPhase: (p) => setPhase(p),
           onResult: (r) => {
@@ -176,6 +252,8 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
     }
   }
 
+  const send = () => void sendText(input)
+
   const stop = () => {
     abortRef.current?.abort()
   }
@@ -186,7 +264,7 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
     setError('')
     setNotice('')
     try {
-      const r = await api.applyGraphDraft(session.draft, { linkExisting })
+      const r = await api.applyGraphDraft(session.draft, { linkExisting: linkExisting || scene === 'extend' })
       let msg = `已新建 ${r.nodes} 个节点、${r.edges} 条连线`
       if (r.linked) msg += `（含 ${r.linked} 条挂接到已有节点）`
       setNotice(msg + '，图谱已刷新')
@@ -204,8 +282,7 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
     setBusy(true)
     setError('')
     try {
-      // 先落库再生成路线
-      await api.applyGraphDraft(session.draft, { linkExisting })
+      await api.applyGraphDraft(session.draft, { linkExisting: linkExisting || scene === 'extend' })
       const r = await api.draftToRoadmap(session.draft)
       setNotice(`已新建图谱，并生成路线「${r.name}」（${r.steps} 步）`)
       persist({ messages: [], draft: null, sources: [], conflicts: null })
@@ -244,14 +321,17 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
     persist(saved)
     setNotice('已恢复本机会话')
     setError('')
+    if (saved.draft || saved.messages.length) setSceneManual('build')
   }
 
   const doSearch = async () => {
-    if (!query.trim()) return
+    const q = (query.trim() || (selectedNode ? `${selectedNode.name} 学习资料` : '')).trim()
+    if (!q) return
+    if (!query.trim() && selectedNode) setQuery(q)
     setSearching(true)
     setSearchMsg('')
     try {
-      const r = await api.webSearch(query.trim())
+      const r = await api.webSearch(q)
       setHits(r.results)
       setSearchConfigured(r.configured)
       setCollected(new Set())
@@ -290,246 +370,145 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
       : phase === 'generating' ? '正在生成图谱…'
         : busy ? '首次生成通常 10~30 秒…' : ''
 
-  return (
-    <div>
-      <div className="mb-3 flex gap-1">
-        <button
-          type="button"
-          onClick={() => setMode('build')}
-          className={`rounded-md px-3 py-1 text-sm ${mode === 'build' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-secondary'}`}
-        >
-          对话构建图谱
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode('search')}
-          className={`rounded-md px-3 py-1 text-sm ${mode === 'search' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-secondary'}`}
-        >
-          联网搜索
-        </button>
-      </div>
+  const sceneTab = (id: Scene, label: string, disabled?: boolean) => (
+    <button
+      type="button"
+      key={id}
+      disabled={disabled}
+      onClick={() => switchScene(id)}
+      className={`rounded-md px-3 py-1.5 text-sm transition-colors disabled:opacity-50 ${
+        scene === id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-secondary'
+      }`}
+    >
+      {label}
+    </button>
+  )
 
-      {mode === 'build' && (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            描述学习方向后先给出预览；可本地改节点，或继续对话修订，确认后才正式新建。
-          </p>
+  const templates = scene === 'extend' && selectedNode
+    ? extendTemplates(selectedNode)
+    : BUILD_TEMPLATES
 
-          {session.searchConfigured === false && (
-            <p className="text-sm text-muted-foreground">
-              未配置联网搜索，结果可能过时；可在 Worker secrets 配置 TAVILY_API_KEY。
-            </p>
-          )}
+  const draftReady = !!session.draft && session.draft.nodes.length > 0
 
-          {session.messages.length > 0 && (
-            <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-border bg-background p-2">
-              {session.messages.map((m, i) => (
-                <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-                  <p
-                    className={`max-w-xs whitespace-pre-wrap rounded-md px-2 py-1 text-xs ${
-                      m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-foreground'
-                    }`}
-                  >
-                    {m.content}
-                  </p>
-                </div>
-              ))}
-              {busy && <p className="text-xs text-muted-foreground">{phaseHint || '正在思考…'}</p>}
-            </div>
-          )}
+  const chatColumn = (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {selectedNode && (scene === 'extend' || scene === 'research') && (
+        <p className="rounded-md border border-border bg-secondary/40 px-2 py-1.5 text-xs text-muted-foreground">
+          锚定：<span className="font-medium text-foreground">{selectedNode.name}</span>
+          {' · '}{domainLabelOf(selectedNode.domain, domains)}
+        </p>
+      )}
 
-          {session.draft && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium">预览图谱</h3>
-                <span className="text-xs text-muted-foreground">
-                  {session.draft.nodes.length} 节点 / {session.draft.edges.length} 连线
-                </span>
-              </div>
-              <GraphDraftPreview draft={session.draft} domains={domains} />
+      {scene !== 'research' && (
+        <p className="text-sm text-muted-foreground">
+          {scene === 'extend'
+            ? '围绕选中知识点生成下游扩展草稿；可本地改节点，或继续对话修订，确认后才正式新建。'
+            : '描述学习方向后先给出预览；可本地改节点，或继续对话修订，确认后才正式新建。'}
+        </p>
+      )}
 
-              {session.sources.length > 0 && (
-                <details className="rounded-md border border-border p-2">
-                  <summary className="cursor-pointer text-xs text-muted-foreground">
-                    参考来源（{session.sources.length}）
-                  </summary>
-                  <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto">
-                    {session.sources.map((h) => {
-                      const url = safeHttpUrl(h.url)
-                      if (!url) return null
-                      return (
-                        <li key={h.url} className="text-xs">
-                          <a href={url} target="_blank" rel="noopener noreferrer" className="text-primary">
-                            {h.title}
-                          </a>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="ml-2 h-6 px-2"
-                            disabled={!nodes.length}
-                            onClick={() => collect(h, url, nodes[0]?.id)}
-                          >
-                            收藏
-                          </Button>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </details>
-              )}
+      {session.searchConfigured === false && scene !== 'research' && (
+        <p className="text-sm text-muted-foreground">
+          未配置联网搜索，结果可能过时；可在 Worker secrets 配置 TAVILY_API_KEY。
+        </p>
+      )}
 
-              <details className="rounded-md border border-border p-2" open>
-                <summary className="cursor-pointer text-xs text-muted-foreground">知识点清单（可本地编辑）</summary>
-                <ul className="mt-2 space-y-2">
-                  {session.draft.nodes.map((n) => (
-                    <li key={n.id} className="rounded-md border border-border p-2 text-xs">
-                      {editingId === n.id ? (
-                        <div className="space-y-2">
-                          <Input
-                            value={n.name}
-                            onChange={(e) => updateNode(n.id, { name: e.target.value })}
-                            className="h-8 text-xs"
-                          />
-                          <div className="flex flex-wrap gap-2">
-                            <Select
-                              value={n.domain}
-                              onChange={(e) => updateNode(n.id, { domain: e.target.value })}
-                              className="h-8 w-40"
-                            >
-                              {domains.map((d) => (
-                                <option key={d.id} value={d.id}>{d.name}</option>
-                              ))}
-                            </Select>
-                            <Select
-                              value={String(n.level)}
-                              onChange={(e) => updateNode(n.id, { level: Number(e.target.value) })}
-                              className="h-8 w-24"
-                            >
-                              <option value="1">L1 入门</option>
-                              <option value="2">L2 进阶</option>
-                              <option value="3">L3 高级</option>
-                            </Select>
-                            <Button size="sm" variant="outline" onClick={() => setEditingId(null)}>完成</Button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <span className="font-medium">{n.name}</span>
-                            <span className="text-muted-foreground">
-                              {' · '}{domainLabelOf(n.domain, domains)}{' · L'}{n.level}
-                              {n.tags?.length ? ` · ${n.tags.join('、')}` : ''}
-                            </span>
-                          </div>
-                          <div className="flex shrink-0 gap-1">
-                            <Button size="sm" variant="outline" className="h-6 px-2" onClick={() => setEditingId(n.id)}>
-                              编辑
-                            </Button>
-                            <Button size="sm" variant="outline" className="h-6 px-2" onClick={() => removeNode(n.id)}>
-                              删除
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-
-              {session.conflicts && (
-                <details className="rounded-md border border-border p-2">
-                  <summary className="cursor-pointer text-xs text-muted-foreground">确认前冲突预览</summary>
-                  <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                    <p>将新建 {session.conflicts.willCreate.length} 个节点</p>
-                    {session.conflicts.remapped.length > 0 && (
-                      <p>
-                        id 重命名：{session.conflicts.remapped.map((r) => `${r.from}→${r.to}`).join('，')}
-                      </p>
-                    )}
-                    {session.conflicts.nameSimilar.length > 0 && (
-                      <p>
-                        名称相近（可能重复）：
-                        {session.conflicts.nameSimilar
-                          .map((s) => `「${s.draftName}」≈「${s.existingName}」`)
-                          .join('；')}
-                      </p>
-                    )}
-                  </div>
-                </details>
-              )}
-
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={linkExisting}
-                  onChange={(e) => setLinkExisting(e.target.checked)}
-                  className="rounded border-border"
-                />
-                确认时自动把名称相近的新节点挂接到已有知识点
-              </label>
-            </div>
-          )}
-
-          <div className="flex gap-2">
-            <Input
-              placeholder={session.draft ? '例如：加两个实战项目，去掉安全部分' : '例如：我想系统学习 Java + AI 应用开发'}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !busy && send()}
-              disabled={busy}
-              className="flex-1"
-            />
-            {busy ? (
-              <Button variant="outline" onClick={stop}>停止</Button>
-            ) : (
-              <Button onClick={send} disabled={!input.trim()}>
-                {session.draft ? '提交修改' : '生成预览'}
-              </Button>
-            )}
-          </div>
-
+      {scene !== 'research' && session.messages.length === 0 && !busy && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">试试这些：</p>
           <div className="flex flex-wrap gap-2">
-            <Button onClick={confirmBuild} disabled={busy || !session.draft || session.draft.nodes.length === 0}>
-              确认新建
-            </Button>
-            <Button
-              variant="outline"
-              onClick={createRoadmap}
-              disabled={busy || !session.draft || session.draft.nodes.length === 0}
-            >
-              新建并生成路线
-            </Button>
-            <Button variant="outline" onClick={reset} disabled={busy || (!session.draft && !session.messages.length)}>
-              重新开始
-            </Button>
-            <Button variant="outline" onClick={saveSession} disabled={!session.draft && !session.messages.length}>
-              保存会话
-            </Button>
-            <Button variant="outline" onClick={restoreSession}>恢复会话</Button>
+            {templates.map((t) => (
+              <button
+                key={t}
+                type="button"
+                className="rounded-md border border-border bg-background px-2.5 py-1 text-left text-xs text-foreground transition-colors hover:bg-secondary"
+                onClick={() => void sendText(t)}
+              >
+                {t}
+              </button>
+            ))}
           </div>
-
-          {phaseHint && <p className="text-sm text-muted-foreground">{phaseHint}</p>}
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
         </div>
       )}
 
-      {mode === 'search' && (
+      {scene !== 'research' && session.messages.length > 0 && (
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border border-border bg-background p-2">
+          {session.messages.map((m, i) => (
+            <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
+              <p
+                className={`max-w-[92%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs ${
+                  m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-foreground'
+                }`}
+              >
+                {m.content}
+              </p>
+            </div>
+          ))}
+          {busy && <p className="text-xs text-muted-foreground">{phaseHint || '正在思考…'}</p>}
+          <div ref={chatEndRef} />
+        </div>
+      )}
+
+      {scene !== 'research' && draftReady && !busy && (
+        <div className="flex flex-wrap gap-1.5">
+          {FOLLOWUPS.map((f) => (
+            <button
+              key={f.label}
+              type="button"
+              className="rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              onClick={() => void sendText(f.text)}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {scene !== 'research' && (
+        <div className="flex gap-2">
+          <Input
+            placeholder={
+              scene === 'extend'
+                ? (session.draft ? '例如：再加两个实战，去掉理论' : '例如：补齐实战项目与常见坑')
+                : (session.draft ? '例如：加两个实战项目，去掉安全部分' : '例如：我想系统学习 Java + AI 应用开发')
+            }
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && !busy && send()}
+            disabled={busy}
+            className="flex-1"
+          />
+          {busy ? (
+            <Button variant="outline" onClick={stop}>停止</Button>
+          ) : (
+            <Button onClick={send} disabled={!input.trim()}>
+              {session.draft ? '提交修改' : '生成预览'}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {scene === 'research' && (
         <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">联网搜索当前信息，结果可一键收藏为知识点的资源链接。</p>
+          <p className="text-sm text-muted-foreground">
+            为选中知识点联网找资料，结果可一键收藏为资源链接。
+          </p>
           {searchConfigured === false && (
             <p className="text-sm text-muted-foreground">未配置 TAVILY_API_KEY，搜索可能无结果。</p>
           )}
           <div className="flex gap-2">
             <Input
-              placeholder="搜索关键词…"
+              placeholder={selectedNode ? `${selectedNode.name} 学习资料` : '搜索关键词…'}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && doSearch()}
               disabled={searching}
               className="flex-1"
             />
-            <Button onClick={doSearch} disabled={searching || !query.trim()}>
+            <Button
+              onClick={doSearch}
+              disabled={searching || !(query.trim() || selectedNode)}
+            >
               {searching ? '搜索中…' : '搜索'}
             </Button>
           </div>
@@ -570,6 +549,190 @@ export default function AgentPanel({ onBuilt, nodes, domains }: Props) {
             </div>
           )}
           {searchMsg && <p className="text-xs text-muted-foreground">{searchMsg}</p>}
+        </div>
+      )}
+
+      {phaseHint && scene !== 'research' && <p className="text-sm text-muted-foreground">{phaseHint}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
+    </div>
+  )
+
+  const previewColumn = scene !== 'research' && draftReady && session.draft ? (
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto border-border lg:border-l lg:pl-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-medium">预览图谱</h3>
+        <span className="text-xs text-muted-foreground">
+          {session.draft.nodes.length} 节点 / {session.draft.edges.length} 连线
+        </span>
+      </div>
+      <GraphDraftPreview
+        draft={session.draft}
+        domains={domains}
+        anchor={
+          scene === 'extend' && selectedNode
+            ? { id: selectedNode.id, name: selectedNode.name, domain: selectedNode.domain }
+            : null
+        }
+      />
+
+      {session.sources.length > 0 && (
+        <details className="rounded-md border border-border p-2">
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            参考来源（{session.sources.length}）
+          </summary>
+          <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto">
+            {session.sources.map((h) => {
+              const url = safeHttpUrl(h.url)
+              if (!url) return null
+              return (
+                <li key={h.url} className="text-xs">
+                  <a href={url} target="_blank" rel="noopener noreferrer" className="text-primary">
+                    {h.title}
+                  </a>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-2 h-6 px-2"
+                    disabled={!targetNodeId || !nodes.find((n) => n.id === targetNodeId)}
+                    onClick={() => collect(h, url, targetNodeId)}
+                  >
+                    收藏
+                  </Button>
+                </li>
+              )
+            })}
+          </ul>
+        </details>
+      )}
+
+      <details className="rounded-md border border-border p-2" open>
+        <summary className="cursor-pointer text-xs text-muted-foreground">知识点清单（可本地编辑）</summary>
+        <ul className="mt-2 space-y-2">
+          {session.draft.nodes.map((n) => (
+            <li key={n.id} className="rounded-md border border-border p-2 text-xs">
+              {editingId === n.id ? (
+                <div className="space-y-2">
+                  <Input
+                    value={n.name}
+                    onChange={(e) => updateNode(n.id, { name: e.target.value })}
+                    className="h-8 text-xs"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Select
+                      value={n.domain}
+                      onChange={(e) => updateNode(n.id, { domain: e.target.value })}
+                      className="h-8 w-40"
+                    >
+                      {domains.map((d) => (
+                        <option key={d.id} value={d.id}>{d.name}</option>
+                      ))}
+                    </Select>
+                    <Select
+                      value={String(n.level)}
+                      onChange={(e) => updateNode(n.id, { level: Number(e.target.value) })}
+                      className="h-8 w-24"
+                    >
+                      <option value="1">L1 入门</option>
+                      <option value="2">L2 进阶</option>
+                      <option value="3">L3 高级</option>
+                    </Select>
+                    <Button size="sm" variant="outline" onClick={() => setEditingId(null)}>完成</Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="font-medium">{n.name}</span>
+                    <span className="text-muted-foreground">
+                      {' · '}{domainLabelOf(n.domain, domains)}{' · L'}{n.level}
+                      {n.tags?.length ? ` · ${n.tags.join('、')}` : ''}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button size="sm" variant="outline" className="h-6 px-2" onClick={() => setEditingId(n.id)}>
+                      编辑
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-6 px-2" onClick={() => removeNode(n.id)}>
+                      删除
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      </details>
+
+      {session.conflicts && (
+        <details className="rounded-md border border-border p-2">
+          <summary className="cursor-pointer text-xs text-muted-foreground">确认前冲突预览</summary>
+          <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+            <p>将新建 {session.conflicts.willCreate.length} 个节点</p>
+            {session.conflicts.remapped.length > 0 && (
+              <p>
+                id 重命名：{session.conflicts.remapped.map((r) => `${r.from}→${r.to}`).join('，')}
+              </p>
+            )}
+            {session.conflicts.nameSimilar.length > 0 && (
+              <p>
+                名称相近（可能重复）：
+                {session.conflicts.nameSimilar
+                  .map((s) => `「${s.draftName}」≈「${s.existingName}」`)
+                  .join('；')}
+              </p>
+            )}
+          </div>
+        </details>
+      )}
+
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={linkExisting || scene === 'extend'}
+          onChange={(e) => setLinkExisting(e.target.checked)}
+          disabled={scene === 'extend'}
+          className="rounded border-border"
+        />
+        {scene === 'extend'
+          ? '扩展模式将自动挂接到锚定知识点'
+          : '确认时自动把名称相近的新节点挂接到已有知识点'}
+      </label>
+    </div>
+  ) : null
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="mb-3 flex flex-wrap gap-1">
+        {sceneTab('build', '从零建图')}
+        {sceneTab('extend', '扩展选中', !selectedNode)}
+        {sceneTab('research', '找资料', !selectedNode && !nodes.length)}
+      </div>
+
+      <div className={`min-h-0 flex-1 ${draftReady && scene !== 'research' ? 'grid gap-4 lg:grid-cols-2' : 'flex flex-col'}`}>
+        {chatColumn}
+        {previewColumn}
+      </div>
+
+      {scene !== 'research' && (
+        <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">
+          <Button onClick={confirmBuild} disabled={busy || !draftReady}>
+            确认新建
+          </Button>
+          <Button
+            variant="outline"
+            onClick={createRoadmap}
+            disabled={busy || !draftReady}
+          >
+            新建并生成路线
+          </Button>
+          <Button variant="outline" onClick={reset} disabled={busy || (!session.draft && !session.messages.length)}>
+            重新开始
+          </Button>
+          <Button variant="outline" onClick={saveSession} disabled={!session.draft && !session.messages.length}>
+            保存会话
+          </Button>
+          <Button variant="outline" onClick={restoreSession}>恢复会话</Button>
         </div>
       )}
     </div>

@@ -10,28 +10,50 @@ import { Domain, domainColorOf, GraphDraft } from '@/api'
 export default function GraphDraftPreview({
   draft,
   domains = [],
+  anchor,
 }: {
   draft: GraphDraft
   domains?: Domain[]
+  /** 扩展场景：显示已有锚定节点（幽灵节点，不在草稿 nodes 内） */
+  anchor?: { id: string; name: string; domain?: string } | null
 }) {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!ref.current || !draft.nodes.length) return
     const ids = new Set(draft.nodes.map((n) => n.id))
+    if (anchor?.id) ids.add(anchor.id)
     const data: GraphData = {
-      nodes: draft.nodes.map((n) => ({
-        id: n.id,
-        style: {
-          fill: domainColorOf(n.domain, domains),
-          size: 12 + n.level * 5,
-          labelText: n.name,
-          labelFill: '#1c1b18',
-          labelFontSize: 10,
-          labelPlacement: 'bottom' as const,
-          labelMaxWidth: 80,
-        },
-      })),
+      nodes: [
+        ...(anchor?.id && !draft.nodes.some((n) => n.id === anchor.id)
+          ? [{
+              id: anchor.id,
+              style: {
+                fill: domainColorOf(anchor.domain ?? '', domains),
+                size: 22,
+                stroke: '#236de9',
+                lineWidth: 2,
+                labelText: `${anchor.name}（已有）`,
+                labelFill: '#1c1b18',
+                labelFontSize: 10,
+                labelPlacement: 'bottom' as const,
+                labelMaxWidth: 96,
+              },
+            }]
+          : []),
+        ...draft.nodes.map((n) => ({
+          id: n.id,
+          style: {
+            fill: domainColorOf(n.domain, domains),
+            size: 12 + n.level * 5,
+            labelText: n.name,
+            labelFill: '#1c1b18',
+            labelFontSize: 10,
+            labelPlacement: 'bottom' as const,
+            labelMaxWidth: 80,
+          },
+        })),
+      ],
       edges: draft.edges
         .filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target)
         .map((e, i) => ({
@@ -63,13 +85,15 @@ export default function GraphDraftPreview({
     return () => {
       try { graph.destroy() } catch { /* 忽略销毁异常 */ }
     }
-  }, [draft, domains])
+  }, [draft, domains, anchor])
 
   return (
     <div className="space-y-2">
-      <div ref={ref} className="h-60 w-full rounded-md border border-border bg-background" />
+      <div ref={ref} className="h-52 w-full rounded-md border border-border bg-background" />
       <p className="text-xs text-muted-foreground">
-        预览仅展示本次待新建的节点与连线，确认后才会写入知识图谱。
+        {anchor?.id
+          ? '蓝框节点为已有锚定点；其余为待新建。确认后才会写入知识图谱。'
+          : '预览仅展示本次待新建的节点与连线，确认后才会写入知识图谱。'}
       </p>
     </div>
   )
