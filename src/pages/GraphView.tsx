@@ -6,12 +6,40 @@ import NodeDrawer from '@/components/NodeDrawer'
 import NodeEditor from '@/components/NodeEditor'
 import EdgeEditor from '@/components/EdgeEditor'
 import AgentPanel from '@/components/AgentPanel'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ProgressBar } from '@/components/ui/progress-bar'
 import { Select } from '@/components/ui/select'
 
-const STATUS_OPACITY: Record<string, number> = { todo: 0.45, learning: 1, done: 1 }
-const STATUS_LINE: Record<string, number> = { todo: 0, learning: 3, done: 1 }
+// 状态视觉：透明度 + 描边线型 + 光环三重编码，避免只靠颜色区分
+const STATUS_OPACITY: Record<string, number> = { todo: 0.35, learning: 1, done: 1 }
+const STATUS_LINE: Record<string, number> = { todo: 1, learning: 3, done: 2 }
+const STATUS_DASH: Record<string, number[] | undefined> = { todo: [2, 2], learning: undefined, done: undefined }
+
+const EDGE_LABEL: Record<string, string> = {
+  prerequisite: '前置',
+  related: '相关',
+  extend: '扩展',
+}
+
+const STATUS_TEXT: Record<string, string> = {
+  todo: '未开始',
+  learning: '学习中',
+  done: '已掌握',
+}
+
+// 重要节点（高等级或已在学习中）常态显示标签，其余仅在悬停/选中时显示
+function isLabelPrimary(n: Node): boolean {
+  return n.level >= 3 || n.status !== 'todo'
+}
+
+function nodeSizeOf(d: unknown): number {
+  const rec = d as { level?: number; data?: { level?: number } } | null
+  const level = rec?.level ?? rec?.data?.level ?? 1
+  // 节点直径 + 标签留白，保证碰撞半径随节点大小自适应
+  return 14 + level * 6 + 24
+}
 
 interface SemanticHit {
   id: string
@@ -31,7 +59,10 @@ export default function GraphView() {
   const [domains, setDomains] = useState<Domain[]>([])
   const [domainFilter, setDomainFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  // 关键词输入与生效值分离：输入去抖 300ms，避免每敲一个字都销毁重建整图
+  const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
+  const [viewMode, setViewMode] = useState<'graph' | 'list'>('graph')
   const [selected, setSelected] = useState<string | null>(null)
   const [semanticQ, setSemanticQ] = useState('')
   const [semanticRes, setSemanticRes] = useState<SemanticHit[] | null>(null)
@@ -44,6 +75,8 @@ export default function GraphView() {
   const drawerDismissedRef = useRef(false)
   const urlFocusRef = useRef<string | null>(null)
   const urlFocusDoneRef = useRef(false)
+  // 节点坐标记忆：重建实例时继承上一次的位置，避免筛选切换后整图跳位
+  const posRef = useRef<Map<string, [number, number]>>(new Map())
 
   const load = useCallback(() => {
     // 只在「尚未成功定位」且「用户没主动关掉抽屉」时读 URL；
@@ -70,12 +103,31 @@ export default function GraphView() {
     api.domains().then(setDomains).catch(() => setDomains([]))
   }, [])
 
+  // 关键词去抖：停止逐字重建图实例
+  useEffect(() => {
+    const t = setTimeout(() => setKeyword(keywordInput.trim()), 300)
+    return () => clearTimeout(t)
+  }, [keywordInput])
+
   // 领域颜色映射：优先 domains 表，回退静态默认值
   const domainColorMap = useMemo(() => {
     const m = new Map<string, string>(Object.entries(DOMAIN_COLOR))
     for (const d of domains) m.set(d.id, d.color)
     return m
   }, [domains])
+
+  // 语义化颜色 Token：与 globals.css 的 CSS 变量保持一致，避免硬编码色值
+  const tokens = useMemo(() => {
+    const cs = getComputedStyle(document.documentElement)
+    const v = (name: string) => cs.getPropertyValue(name).trim()
+    return {
+      fg: `hsl(${v('--foreground')})`,
+      muted: `hsl(${v('--muted-foreground')})`,
+      primary: `hsl(${v('--primary')})`,
+      border: `hsl(${v('--border')})`,
+      card: `hsl(${v('--card')})`,
+    }
+  }, [])
 
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase()
@@ -88,41 +140,60 @@ export default function GraphView() {
     return { nodes: ns, edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)) }
   }, [nodes, edges, domainFilter, statusFilter, keyword])
 
-  const buildData = (ns: Node[], es: Edge[]): GraphData => ({
+  const buildData = useCallback((ns: Node[], es: Edge[]): GraphData => ({
     nodes: ns.map((n) => {
       const color = domainColorMap.get(n.domain) ?? '#888780'
+      const prev = posRef.current.get(n.id)
       return {
         id: n.id,
+        // level 冗余到顶层，供 d3-force 的 nodeSize 回调读取
+        level: n.level,
+        // 继承上次布局坐标，避免筛选切换后整图重排
+        ...(prev ? { x: prev[0], y: prev[1] } : {}),
         data: { ...n, tags: safeTags(n.tags) },
         style: {
           fill: color,
           fillOpacity: STATUS_OPACITY[n.status],
-          stroke: n.status === 'learning' ? '#185FA5' : color,
+          stroke: n.status === 'learning' ? tokens.primary : color,
           lineWidth: STATUS_LINE[n.status],
+          lineDash: STATUS_DASH[n.status],
           size: 14 + n.level * 6,
-          labelText: n.name,
-          labelFill: '#1c1b18',
+          // 已掌握节点加光环，形成颜色之外的第二重编码
+          halo: n.status === 'done',
+          haloStrokeWidth: 6,
+          haloStrokeColor: color,
+          haloOpacity: 0.22,
+          labelText: isLabelPrimary(n) ? n.name : '',
+          labelFill: tokens.fg,
           labelFontSize: 11,
           labelPlacement: 'bottom' as const,
           labelMaxWidth: 90,
         },
       }
     }),
-    edges: es.map((e) => ({
-      source: e.source,
-      target: e.target,
-      style: {
-        stroke: e.type === 'prerequisite' ? '#888780' : '#D3D1C7',
-        lineDash: e.type === 'prerequisite' ? undefined : [4, 4],
-        endArrow: e.type === 'prerequisite',
-      },
-    })),
-  })
+    edges: es.map((e) => {
+      const isPrereq = e.type === 'prerequisite'
+      return {
+        id: String(e.id),
+        source: e.source,
+        target: e.target,
+        data: { type: e.type },
+        style: {
+          // 前置=实线箭头，相关=长虚线，扩展=点线
+          stroke: isPrereq ? tokens.muted : tokens.border,
+          lineDash: isPrereq ? undefined : e.type === 'related' ? [4, 4] : [1, 3],
+          endArrow: isPrereq,
+        },
+      }
+    }),
+  }), [domainColorMap, tokens])
 
   // 创建/重建 Graph 实例：数据或领域颜色变化时，销毁旧实例并按最新数据重建，
   // 避免 G6 setData 增量 diff 在筛选切换时抛 "Node not found" 或节点堆叠
   useEffect(() => {
     if (!ref.current) return
+    // 坐标记忆表在 effect 内取一次引用，供 buildData 与 cleanup 共用
+    const posMap = posRef.current
     // 兜底过滤：边只保留两端节点都存在的，防止 orphan edge
     const data = buildData(filtered.nodes, filtered.edges)
     const validIds = new Set((data.nodes ?? []).map((n) => n.id))
@@ -136,11 +207,63 @@ export default function GraphView() {
       data,
       layout: {
         type: 'd3-force',
-        link: { distance: 90 },
+        // 碰撞半径由 nodeSize 自适应（不再写死 40），间距留给标签
+        nodeSize: nodeSizeOf,
+        nodeSpacing: 8,
+        // 前置关系拉近，其余关系放宽，语义在空间上可分辨
+        linkDistance: (edge) => (edge.data?.type === 'prerequisite' ? 70 : 120),
         manyBody: { strength: -180 },
-        collide: { radius: 40 },
+        // 更快收敛，减少首屏抖动
+        alpha: 0.9,
+        alphaDecay: 0.05,
       },
-      behaviors: ['drag-canvas', 'zoom-canvas', 'drag-element'],
+      node: {
+        state: {
+          // 选中态：主色描边 + 光环，并补出标签
+          selected: (d) => ({
+            lineWidth: 3,
+            stroke: tokens.primary,
+            halo: true,
+            haloStrokeWidth: 8,
+            haloStrokeColor: tokens.primary,
+            haloOpacity: 0.18,
+            labelText: (d.data as Node | undefined)?.name ?? '',
+          }),
+          // 悬停激活态：补出标签，便于识别小节点
+          active: (d) => ({
+            lineWidth: 3,
+            labelText: (d.data as Node | undefined)?.name ?? '',
+          }),
+          // 未激活态：淡化非相关元素（保留轮廓，不完全消失）
+          inactive: { fillOpacity: 0.18 },
+        },
+      },
+      edge: {
+        state: {
+          active: (d) => ({
+            lineWidth: 2,
+            labelText: EDGE_LABEL[(d.data as { type?: string } | undefined)?.type ?? ''] ?? '',
+            labelFontSize: 11,
+            labelFill: tokens.muted,
+            labelBackground: true,
+            labelBackgroundFill: tokens.card,
+            labelBackgroundRadius: 4,
+          }),
+          selected: { lineWidth: 2, stroke: tokens.primary },
+          inactive: { strokeOpacity: 0.12 },
+        },
+      },
+      behaviors: [
+        'drag-canvas',
+        'zoom-canvas',
+        'drag-element',
+        // 悬停高亮一阶邻居，其余元素淡化
+        { type: 'hover-activate', degree: 1, state: 'active', inactiveState: 'inactive' },
+        // 点击选中（与打开抽屉的 node:click 并存）
+        { type: 'click-select', multiple: false, state: 'selected' },
+        // 按住 Shift 点击聚焦到视图中心，避免与普通点击冲突
+        { type: 'focus-element', trigger: 'shift' },
+      ],
     })
     graph.on('node:click', (e: IElementEvent) => {
       const id = (e.target as { id?: string }).id
@@ -152,13 +275,18 @@ export default function GraphView() {
     renderPromiseRef.current = rendering
     graphRef.current = graph
     return () => {
+      // 采集坐标供下一次重建继承（逐节点容错，单个失败不影响其余）
+      for (const n of filtered.nodes) {
+        try {
+          const p = graph.getElementPosition(n.id)
+          if (p) posMap.set(n.id, [p[0], p[1]])
+        } catch { /* 元素已不存在时跳过 */ }
+      }
       graphRef.current = null
       renderPromiseRef.current = null
       try { graph.destroy() } catch { /* 忽略销毁异常 */ }
     }
-    // 每次数据或领域颜色变化时重建，确保布局正确
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, domainColorMap])
+  }, [filtered, buildData, viewMode, tokens])
 
   // 视口聚焦只操作已建成的实例：不触碰 render/layout 链路，也不改回 setData
   // （AGENTS.md 第五节：筛选切换必须销毁重建，额外布局调用会产生竞态报错）
@@ -208,6 +336,12 @@ export default function GraphView() {
     setShowNodeEditor(true)
   }
 
+  const zoomBy = (ratio: number) => { void graphRef.current?.zoomBy(ratio) }
+  const fitView = () => { void graphRef.current?.fitView() }
+  const focusSelected = () => {
+    if (selected) void graphRef.current?.focusElement(selected)
+  }
+
   return (
     <div className="relative">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -223,8 +357,8 @@ export default function GraphView() {
         </Select>
         <Input
           placeholder="搜索知识点…"
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          value={keywordInput}
+          onChange={(e) => setKeywordInput(e.target.value)}
           className="w-44"
         />
         <Input
@@ -241,6 +375,13 @@ export default function GraphView() {
           <Button variant="outline" size="sm" onClick={() => setShowEdgeEditor(true)}>新建连线</Button>
           <Button variant="outline" size="sm" disabled={!selected} onClick={openEdit}>编辑</Button>
           <Button variant="destructive" size="sm" disabled={!selected} onClick={removeNode}>删除</Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setViewMode((v) => (v === 'graph' ? 'list' : 'graph'))}
+          >
+            {viewMode === 'graph' ? '列表视图' : '图谱视图'}
+          </Button>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {domains.map((d) => (
@@ -284,10 +425,74 @@ export default function GraphView() {
         <div className="fixed inset-0 z-10 bg-black/25" onClick={() => setShowAgent(false)} />
       )}
 
-      <div
-        ref={ref}
-        className="h-[calc(100vh-110px)] w-full rounded-lg border border-border bg-card"
-      />
+      <div className="relative">
+        {viewMode === 'graph' ? (
+          <div
+            ref={ref}
+            className="h-[calc(100vh-110px)] w-full rounded-lg border border-border bg-card"
+          />
+        ) : (
+          <div className="h-[calc(100vh-110px)] w-full overflow-auto rounded-lg border border-border bg-card">
+            {filtered.nodes.length === 0 ? (
+              <p className="p-6 text-sm text-muted-foreground">没有匹配的节点，试试放宽筛选条件。</p>
+            ) : (
+              <table className="w-full text-sm">
+                <caption className="sr-only">知识节点列表，可点击名称查看详情</caption>
+                <thead>
+                  <tr className="border-b border-border text-left text-muted-foreground">
+                    <th scope="col" className="px-3 py-2 font-medium">名称</th>
+                    <th scope="col" className="px-3 py-2 font-medium">领域</th>
+                    <th scope="col" className="px-3 py-2 font-medium">等级</th>
+                    <th scope="col" className="px-3 py-2 font-medium">状态</th>
+                    <th scope="col" className="px-3 py-2 font-medium">进度</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.nodes.map((n) => (
+                    <tr key={n.id} className="border-b border-border last:border-0 hover:bg-secondary">
+                      <td className="px-3 py-2">
+                        <button
+                          className="rounded-sm text-left font-medium underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() => setSelected(n.id)}
+                        >
+                          {n.name}
+                        </button>
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className="inline-block h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: domainColorMap.get(n.domain) ?? '#888780' }}
+                          />
+                          {domains.find((d) => d.id === n.domain)?.name ?? n.domain}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">Lv{n.level}</td>
+                      <td className="px-3 py-2">
+                        <Badge variant={n.status === 'done' ? 'default' : 'outline'}>
+                          {STATUS_TEXT[n.status] ?? n.status}
+                        </Badge>
+                      </td>
+                      <td className="w-40 px-3 py-2">
+                        <ProgressBar value={n.progress} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {viewMode === 'graph' && (
+          <div className="absolute right-3 top-3 z-[5] flex items-center gap-1 rounded-lg border border-border bg-card p-1 shadow-sm">
+            <Button variant="ghost" size="sm" onClick={() => zoomBy(1 / 1.2)} aria-label="缩小">−</Button>
+            <Button variant="ghost" size="sm" onClick={() => zoomBy(1.2)} aria-label="放大">+</Button>
+            <Button variant="ghost" size="sm" onClick={fitView}>适应画布</Button>
+            <Button variant="ghost" size="sm" disabled={!selected} onClick={focusSelected}>聚焦选中</Button>
+          </div>
+        )}
+      </div>
 
       {showAgent && (
         <div className="fixed inset-y-0 right-0 z-[11] w-[400px] max-w-[90vw] overflow-y-auto border-l border-border bg-card p-5 shadow-lg">
@@ -320,7 +525,7 @@ export default function GraphView() {
       {showEdgeEditor && (
         <EdgeEditor
           nodes={nodes}
-          onClose={() => setShowEdgeEditor(false)}
+          onClose={() => { setShowEdgeEditor(false) }}
           onSaved={() => { setShowEdgeEditor(false); load() }}
         />
       )}
