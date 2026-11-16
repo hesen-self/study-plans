@@ -71,7 +71,8 @@ const DRAFT_CACHE_TTL = 600 // 10 分钟
 
 // 主模型：建图 / 教材；快模型：领域分类等短任务
 export const CHAT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
-export const FAST_MODEL = '@cf/meta/llama-3.1-8b-instruct'
+// 非 -fast 的 3.1-8b 已于 2026-05-30 废弃（错误码 5028）
+export const FAST_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast'
 
 export type EnvWithSearch = {
   AI: Ai
